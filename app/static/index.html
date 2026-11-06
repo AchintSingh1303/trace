@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TRACE</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f5bea'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h8' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Sign in -->
+  <div id="login" class="login hidden">
+    <form id="loginForm" class="login-card" autocomplete="on">
+      <div class="brand big">TRACE</div>
+      <p class="muted">Requirements to reviewed, traceable test cases. A local demo.</p>
+      <label>Email<input id="loginEmail" type="email" required autocomplete="username" /></label>
+      <label>Password<input id="loginPassword" type="password" required autocomplete="current-password" /></label>
+      <button class="btn primary" type="submit">Sign in</button>
+      <p id="loginError" class="error"></p>
+      <div class="demo-users">
+        <div class="muted small">Demo accounts (password <code>demo123</code>)</div>
+        <div id="demoUsers" class="chips"></div>
+      </div>
+    </form>
+  </div>
+
+  <!-- App -->
+  <div id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand">TRACE</div>
+      <div class="selectors">
+        <select id="projectSelect" aria-label="Project"></select>
+        <select id="cycleSelect" aria-label="Cycle"></select>
+        <button id="newProjectBtn" class="btn small" data-min="qa_lead">New project</button>
+        <button id="newCycleBtn" class="btn small" data-min="qa_lead">New cycle</button>
+      </div>
+      <div class="userbox">
+        <span id="userLabel" class="muted small"></span>
+        <button id="logoutBtn" class="btn small">Sign out</button>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="requirements">Requirements</button>
+      <button data-tab="generate">Generate</button>
+      <button data-tab="review">Review</button>
+      <button data-tab="trace">Traceability</button>
+      <button data-tab="roadmap">Roadmap</button>
+    </nav>
+
+    <main>
+      <section id="tab-overview" class="tab"></section>
+      <section id="tab-requirements" class="tab hidden"></section>
+      <section id="tab-generate" class="tab hidden"></section>
+      <section id="tab-review" class="tab hidden"></section>
+      <section id="tab-trace" class="tab hidden"></section>
+      <section id="tab-roadmap" class="tab hidden"></section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card" id="modalCard"></div></div>
+  <aside id="drawer" class="drawer hidden" aria-label="Test case details"></aside>
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

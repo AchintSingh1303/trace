@@ -1,0 +1,826 @@
+"use strict";
+
+const ROLE_RANK = { viewer: 1, tester: 2, qa_lead: 3, admin: 4 };
+const TYPE_INFO = {
+  functional: ["Functional", "Smoke, happy path, negative and boundary cases from acceptance criteria"],
+  api: ["API", "Auth, contract, error handling and not-found checks per endpoint"],
+  security: ["Security", "Authentication, access control, input handling, sessions and data exposure"],
+  performance: ["Performance", "Baseline, load, stress, spike and soak scenarios with targets"],
+  integration: ["Integration", "Journeys and UI-to-API consistency across several requirements"],
+};
+
+const state = {
+  token: localStorage.getItem("trace_token"),
+  user: null,
+  projects: [],
+  projectId: null,
+  cycleId: null,
+  summary: null,
+  reqs: [],
+  cases: [],
+  filters: { type: "", status: "", q: "", stale: false, req: "" },
+  selected: new Set(),
+  gen: { running: false, panels: {}, selected: [], info: null, gaps: null, error: null, complete: null },
+  streamAbort: null,
+  tab: "overview",
+  providers: [],
+  // The API key lives here, in memory only. It is never put in localStorage or the URL.
+  llm: { provider: null, model: "", key: "" },
+};
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const can = (min) => state.user && ROLE_RANK[state.user.role] >= ROLE_RANK[min];
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+function toast(message, bad = false) {
+  const el = $("#toast");
+  el.textContent = message;
+  el.className = "toast" + (bad ? " bad" : "");
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => el.classList.add("hidden"), 4200);
+}
+
+async function api(path, { method = "GET", body, raw = false } = {}) {
+  const headers = {};
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+  if (res.status === 401 && state.token && !path.includes("/auth/login")) {
+    signOut();
+    throw new Error("Your session expired. Please sign in again.");
+  }
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const data = await res.json();
+      message = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+    } catch (_) {}
+    throw new Error(message);
+  }
+  if (raw) return res;
+  return res.status === 204 ? null : res.json();
+}
+
+// ------------------------------------------------------------------ auth
+
+async function showLogin() {
+  $("#app").classList.add("hidden");
+  $("#login").classList.remove("hidden");
+  try {
+    const users = await fetch("/api/auth/demo-users").then((r) => r.json());
+    $("#demoUsers").innerHTML = users
+      .map((u) => `<button type="button" class="chip" data-email="${esc(u.email)}">${esc(u.name)} (${esc(u.role)})</button>`)
+      .join("");
+  } catch (_) {}
+}
+
+async function signIn(email, password) {
+  $("#loginError").textContent = "";
+  try {
+    const data = await api("/api/auth/login", { method: "POST", body: { email, password } });
+    state.token = data.access_token;
+    localStorage.setItem("trace_token", state.token);
+    state.user = data.user;
+    await startApp();
+  } catch (err) {
+    $("#loginError").textContent = err.message;
+  }
+}
+
+function signOut() {
+  stopStream();
+  state.llm = { provider: null, model: "", key: "" };
+  localStorage.removeItem("trace_token");
+  state.token = null;
+  state.user = null;
+  showLogin();
+}
+
+// ------------------------------------------------------------------ boot
+
+async function startApp() {
+  if (!state.user) state.user = await api("/api/auth/me");
+  $("#login").classList.add("hidden");
+  $("#app").classList.remove("hidden");
+  $("#userLabel").textContent = `${state.user.name} · ${state.user.role}`;
+  $$("[data-min]").forEach((el) => (el.hidden = !can(el.dataset.min)));
+  const listing = await api("/api/llm/providers");
+  state.providers = listing.providers;
+  if (!state.llm.provider) {
+    const saved = localStorage.getItem("trace_provider");
+    state.llm.provider = state.providers.some((p) => p.id === saved) ? saved : listing.default;
+  }
+  await loadProjects();
+}
+
+function providerInfo(id) {
+  return state.providers.find((p) => p.id === id) || state.providers[0];
+}
+
+function syncGeneratorBox() {
+  const info = providerInfo(state.llm.provider);
+  const live = info && info.id !== "rules";
+  const box = $("#gKeyBox");
+  if (!box) return;
+  box.hidden = !live;
+  if (live) {
+    $("#gKey").value = state.llm.key; // set as a property so the key never appears in the page markup
+    $("#gKey").placeholder = info.server_key ? "Using the key configured on the server (optional)" : info.key_hint;
+    $("#gModel").placeholder = info.default_model;
+  }
+}
+
+async function loadProjects() {
+  state.projects = await api("/api/projects");
+  const saved = Number(localStorage.getItem("trace_project"));
+  const project = state.projects.find((p) => p.id === saved) || state.projects[0];
+  state.projectId = project ? project.id : null;
+  renderSelectors();
+  if (project) await selectCycle(Number(localStorage.getItem("trace_cycle")) || project.cycles[0]?.id);
+  else renderAll();
+}
+
+function renderSelectors() {
+  $("#projectSelect").innerHTML = state.projects.map((p) => `<option value="${p.id}" ${p.id === state.projectId ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+  const project = state.projects.find((p) => p.id === state.projectId);
+  const cycles = project ? project.cycles : [];
+  $("#cycleSelect").innerHTML = cycles.map((c) => `<option value="${c.id}" ${c.id === state.cycleId ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+}
+
+async function selectCycle(cycleId) {
+  const project = state.projects.find((p) => p.id === state.projectId);
+  const cycle = project?.cycles.find((c) => c.id === cycleId) || project?.cycles[0];
+  state.cycleId = cycle ? cycle.id : null;
+  localStorage.setItem("trace_project", state.projectId);
+  localStorage.setItem("trace_cycle", state.cycleId);
+  state.selected.clear();
+  state.filters = { type: "", status: "", q: "", stale: false, req: "" };
+  renderSelectors();
+  await refreshCycle();
+  await restoreGeneration();
+}
+
+async function refreshCycle() {
+  if (!state.cycleId) return renderAll();
+  const [cycle, reqs, cases] = await Promise.all([
+    api(`/api/cycles/${state.cycleId}`),
+    api(`/api/cycles/${state.cycleId}/requirements`),
+    api(`/api/cycles/${state.cycleId}/test-cases`),
+  ]);
+  state.summary = cycle.summary;
+  state.reqs = reqs;
+  state.cases = cases;
+  renderAll();
+}
+
+// ------------------------------------------------------------------ tabs
+
+function setTab(tab) {
+  state.tab = tab;
+  $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $$(".tab").forEach((s) => s.classList.toggle("hidden", s.id !== `tab-${tab}`));
+  renderTab(tab);
+}
+
+function renderAll() {
+  renderTab(state.tab);
+}
+
+function renderTab(tab) {
+  if (!state.cycleId && tab !== "roadmap") {
+    $(`#tab-${tab}`).innerHTML = `<div class="card empty">No project yet. Create one to get started.</div>`;
+    return;
+  }
+  ({ overview: renderOverview, requirements: renderRequirements, generate: renderGenerate, review: renderReview, trace: renderTrace, roadmap: renderRoadmap }[tab])();
+}
+
+// ------------------------------------------------------------------ overview
+
+async function renderOverview() {
+  const s = state.summary;
+  const el = $("#tab-overview");
+  const total = s.test_cases || 1;
+  const typeBars = Object.keys(TYPE_INFO)
+    .map((t) => {
+      const n = s.by_type[t] || 0;
+      return `<div class="bar-row"><span>${cap(t)}</span><div class="bar"><span style="width:${(100 * n) / total}%"></span></div><b>${n}</b></div>`;
+    })
+    .join("");
+  const run = s.last_run;
+  el.innerHTML = `
+    <div class="page-head"><div><h2>Overview</h2><div class="muted">Where this cycle stands right now.</div></div>
+      <button class="btn primary" data-goto="generate">Generate test cases</button></div>
+    <div class="grid kpis">
+      <div class="card kpi"><div class="value">${s.requirements}</div><div class="label">Requirements</div></div>
+      <div class="card kpi"><div class="value">${s.test_cases}</div><div class="label">Test cases</div></div>
+      <div class="card kpi"><div class="value">${s.by_status.approved}</div><div class="label">Approved</div></div>
+      <div class="card kpi"><div class="value">${s.by_status.pending}</div><div class="label">Awaiting review</div></div>
+      <div class="card kpi"><div class="value">${s.coverage_pct}%</div><div class="label">Requirements covered</div></div>
+      <div class="card kpi"><div class="value">${s.stale_test_cases}</div><div class="label">Stale cases</div></div>
+    </div>
+    ${s.stale_test_cases ? `<div class="notice warn">${s.stale_test_cases} test case(s) were written against an older version of ${s.stale_requirements} requirement(s). Run an <b>incremental</b> generation to refresh only those.</div>` : ""}
+    <div class="grid two">
+      <div class="card"><h3>Test cases by type</h3>${s.test_cases ? typeBars : '<div class="muted">Nothing generated yet.</div>'}</div>
+      <div class="card"><h3>Last generation run</h3>${
+        run
+          ? `<div>${statusPill(run.status)} <span class="muted">${esc(run.mode)} mode · ${esc(run.provider)} generator</span></div>
+             <div class="muted small" style="margin-top:6px">Started ${esc(new Date(run.started_at + "Z").toLocaleString())}</div>
+             ${run.summary && run.summary.total !== undefined ? `<div style="margin-top:8px">${run.summary.total} created, ${run.summary.deleted} replaced${run.summary.replaced_approved ? ` (${run.summary.replaced_approved} were approved)` : ""}</div>` : ""}
+             ${run.error ? `<div class="error">${esc(run.error)}</div>` : ""}`
+          : '<div class="muted">No runs yet.</div>'
+      }</div>
+    </div>
+    <div class="card" style="margin-top:14px"><h3>Recent activity</h3><div id="activity" class="muted">Loading...</div></div>`;
+  try {
+    const rows = await api(`/api/cycles/${state.cycleId}/audit?limit=8`);
+    $("#activity").innerHTML = rows.length
+      ? `<table><tbody>${rows.map((r) => `<tr><td class="nowrap muted small">${esc(new Date(r.at + "Z").toLocaleString())}</td><td>${esc(r.actor)}</td><td><code>${esc(r.action)}</code></td><td>${esc(r.entity_id)}</td></tr>`).join("")}</tbody></table>`
+      : "No activity yet.";
+  } catch (_) {}
+}
+
+function statusPill(status) {
+  const cls = { complete: "ok", approved: "ok", running: "info", failed: "bad", rejected: "bad", pending: "warn" }[status] || "";
+  return `<span class="pill ${cls}">${esc(status)}</span>`;
+}
+
+// ------------------------------------------------------------------ requirements
+
+function renderRequirements() {
+  const editable = can("qa_lead");
+  $("#tab-requirements").innerHTML = `
+    <div class="page-head"><div><h2>Requirements</h2>
+      <div class="muted">Editing a requirement bumps its version and marks linked test cases stale.</div></div>
+      ${editable ? '<button class="btn primary" id="addReq">Add requirement</button>' : ""}</div>
+    <div class="table-wrap"><table><thead><tr><th>Code</th><th>Type</th><th>Requirement</th><th>Criteria</th><th>Version</th><th>Test cases</th>${editable ? "<th></th>" : ""}</tr></thead>
+    <tbody>${
+      state.reqs.length
+        ? state.reqs
+            .map(
+              (r) => `<tr>
+        <td class="nowrap"><b>${esc(r.code)}</b></td>
+        <td><span class="pill info">${esc(r.req_type)}</span></td>
+        <td><div>${esc(r.title)}</div><div class="muted small">${esc(r.description)}</div></td>
+        <td>${r.acceptance_criteria.length}</td>
+        <td>v${r.version}</td>
+        <td>${r.test_case_count}${r.stale_test_cases ? ` <span class="pill warn">${r.stale_test_cases} stale</span>` : ""}</td>
+        ${editable ? `<td class="nowrap"><button class="btn small" data-edit="${r.id}">Edit</button> <button class="btn small bad" data-del="${r.id}">Delete</button></td>` : ""}
+      </tr>`
+            )
+            .join("")
+        : `<tr><td colspan="7" class="empty">No requirements yet.</td></tr>`
+    }</tbody></table></div>`;
+}
+
+function openRequirementModal(req) {
+  const types = ["Functional", "UI", "API", "Security", "Performance", "Journey"];
+  openModal(`
+    <h2>${req ? `Edit ${esc(req.code)}` : "Add requirement"}</h2>
+    <label>Type<select id="rType">${types.map((t) => `<option ${req && req.req_type === t ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+    <label>Title<input id="rTitle" value="${esc(req?.title || "")}" /></label>
+    <label>Description<textarea id="rDesc" rows="2">${esc(req?.description || "")}</textarea></label>
+    <label>Acceptance criteria (one per line)<textarea id="rAc" rows="6">${esc((req?.acceptance_criteria || []).join("\n"))}</textarea></label>
+    <p id="modalError" class="error"></p>
+    <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="saveReq">${req ? "Save changes" : "Add"}</button></div>`);
+  $("#saveReq").onclick = async () => {
+    const body = {
+      req_type: $("#rType").value,
+      title: $("#rTitle").value.trim(),
+      description: $("#rDesc").value,
+      acceptance_criteria: $("#rAc").value.split("\n"),
+    };
+    try {
+      if (req) {
+        const updated = await api(`/api/cycles/${state.cycleId}/requirements/${req.id}`, { method: "PATCH", body });
+        toast(updated.version > req.version ? `${updated.code} is now v${updated.version}. ${updated.stale_test_cases} test case(s) are stale.` : "No changes to save.");
+      } else {
+        await api(`/api/cycles/${state.cycleId}/requirements`, { method: "POST", body });
+        toast("Requirement added.");
+      }
+      closeModal();
+      await refreshCycle();
+    } catch (err) {
+      $("#modalError").textContent = err.message;
+    }
+  };
+}
+
+// ------------------------------------------------------------------ generate
+
+function renderGenerate() {
+  const g = state.gen;
+  const s = state.summary;
+  const hasChanges = s.stale_test_cases > 0 || state.reqs.some((r) => r.test_case_count === 0);
+  const prior = s.test_cases > 0 && hasChanges ? "incremental" : "full";
+  const canRun = can("qa_lead");
+  $("#tab-generate").innerHTML = `
+    <div class="page-head"><div><h2>Generate test cases</h2>
+      <div class="muted">Agents run in parallel and stream each case as it is written.</div></div></div>
+    <div class="gen-layout">
+      <div class="card">
+        <h3>Generator</h3>
+        <label>Who writes the test cases
+          <select id="gProvider">${state.providers.map((p) => `<option value="${p.id}" ${p.id === state.llm.provider ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select>
+        </label>
+        <div id="gKeyBox" class="keybox" hidden>
+          <label>API key<input id="gKey" type="password" autocomplete="off" spellcheck="false" /></label>
+          <label>Model <span class="muted">(edit if your account uses another)</span><input id="gModel" autocomplete="off" spellcheck="false" value="${esc(state.llm.model)}" /></label>
+          <div class="keyrow"><button class="btn small" id="gCheck" type="button" ${canRun ? "" : "disabled"}>Test key</button><span id="gCheckMsg" class="small"></span></div>
+          <p class="muted small">Sent with the Generate request, used for that run only, and never stored, logged or shown again. It is forgotten when you sign out or reload.</p>
+        </div>
+        <h3 style="margin-top:14px">Test types</h3>
+        ${Object.entries(TYPE_INFO).map(([k, [name, desc]]) => `<label class="type-option"><input type="checkbox" name="gtype" value="${k}" checked /><span><b>${name}</b><span class="muted">${desc}</span></span></label>`).join("")}
+        <h3 style="margin-top:14px">Mode</h3>
+        <label class="radio-card ${prior === "full" ? "on" : ""}"><input type="radio" name="gmode" value="full" ${prior === "full" ? "checked" : ""}/><span><b>Full</b><br><span class="muted">Replace every case of the selected types. Approvals are lost.</span></span></label>
+        <label class="radio-card ${prior === "incremental" ? "on" : ""}"><input type="radio" name="gmode" value="incremental" ${prior === "incremental" ? "checked" : ""}/><span><b>Incremental</b><br><span class="muted">Only new or changed requirements (${s.stale_requirements} changed, ${state.reqs.filter((r) => r.test_case_count === 0).length} new). Other cases and approvals stay.</span></span></label>
+        <label>Max test cases (optional)<input id="gMax" type="number" min="1" placeholder="no limit" /></label>
+        <button class="btn primary" id="runGen" style="margin-top:12px;width:100%" ${g.running || !canRun ? "disabled" : ""}>${g.running ? "Generating..." : "Generate"}</button>
+        ${canRun ? "" : '<div class="muted small" style="margin-top:6px">QA lead role or higher is needed to generate.</div>'}
+      </div>
+      <div id="genOut"></div>
+    </div>`;
+  syncGeneratorBox();
+  renderGenOutput();
+}
+
+function renderGenOutput() {
+  const out = $("#genOut");
+  if (!out) return;
+  const g = state.gen;
+  if (!g.info && !g.error) {
+    out.innerHTML = `<div class="card empty">Choose test types and press Generate. Progress appears here live.</div>`;
+    return;
+  }
+  const head = g.info
+    ? `<div class="status-line">${g.running ? '<div class="spinner"></div><b>Generating</b>' : g.error ? '<span class="pill bad">failed</span>' : '<span class="pill ok">complete</span>'}
+        <span class="muted">${esc(g.info.app)} · ${esc(g.info.mode)} mode · ${esc(g.info.generator || g.info.provider)}${g.info.model ? ` (${esc(g.info.model)})` : ""} · ${g.info.requirements} requirements${g.info.mode === "incremental" ? ` (${g.info.new_requirements} new, ${g.info.stale_requirements} changed)` : ""}</span></div>`
+    : "";
+  const panels = Object.keys(TYPE_INFO)
+    .map((t) => {
+      const p = g.panels[t] || { state: "off", count: 0, feed: [], subtypes: [], total: 0, generator: "" };
+      const label = { off: "not selected", queued: "queued", running: "running", done: "done" }[p.state];
+      const cls = { off: "", queued: "", running: "info", done: "ok" }[p.state];
+      return `<div class="agent ${p.state}">
+        <div class="agent-head"><b>${TYPE_INFO[t][0]}</b><span class="pill ${cls}">${label}${p.state === "running" || p.state === "done" ? ` · ${p.state === "done" ? p.total : p.count}` : ""}</span></div>
+        ${p.state === "done" && p.generator && p.generator !== "rules" ? `<div class="small ${p.generator.includes("fallback") ? "" : "muted"}">Written by ${esc(p.generator)}</div>` : ""}
+        ${p.subtypes.length ? `<div class="chips">${p.subtypes.map((x) => `<span class="pill">${esc(x.label)} ${x.count}</span>`).join("")}</div>` : ""}
+        ${p.feed.length ? `<ul class="feed">${p.feed.map((f) => `<li title="${esc(f)}">${esc(f)}</li>`).join("")}</ul>` : ""}
+      </div>`;
+    })
+    .join("");
+  let done = "";
+  if (g.error) done = `<div class="notice bad">Generation failed: ${esc(g.error)}</div>`;
+  if (g.complete) {
+    const c = g.complete;
+    const gaps = c.coverage_gaps || [];
+    done = `<div class="notice ok"><b>${c.total} test cases created</b> in ${c.elapsed_s}s${c.deleted ? `, replacing ${c.deleted}` : ""}${c.replaced_approved ? ` (${c.replaced_approved} of them were already approved and need re-review)` : ""}.
+      <a href="#" data-goto="review">Review them</a></div>
+      ${gaps.length ? `<div class="notice warn"><b>${gaps.length} requirement(s) have no test cases:</b><ul style="margin:6px 0 0 18px;padding:0">${gaps.map((x) => `<li>${esc(x.code)} ${esc(x.title)} <span class="muted">(${x.reason === "agent_not_selected" ? "needs the " + x.missing_agents.join(" or ") + " agent" : "no cases generated"})</span></li>`).join("")}</ul></div>` : ""}`;
+  }
+  out.innerHTML = `${head}${done}<div class="agents">${panels}</div>`;
+}
+
+function resetGen() {
+  state.gen = { running: false, panels: {}, selected: [], info: null, gaps: null, error: null, complete: null, lastMode: state.gen.lastMode };
+}
+
+function handleEvent(e) {
+  const g = state.gen;
+  const d = e.data;
+  switch (e.type) {
+    case "pipeline_start":
+      g.running = true;
+      g.info = d;
+      g.selected = d.selected_types;
+      g.lastMode = d.mode;
+      Object.keys(TYPE_INFO).forEach((t) => (g.panels[t] = { state: d.selected_types.includes(t) ? "queued" : "off", count: 0, feed: [], subtypes: [], total: 0 }));
+      break;
+    case "agent_start":
+      if (g.panels[d.test_type]) g.panels[d.test_type].state = "running";
+      break;
+    case "tc_created": {
+      const p = g.panels[d.test_type];
+      if (p) {
+        p.count += 1;
+        p.feed.push(`${cap(d.priority)} · ${d.title}`);
+        if (p.feed.length > 5) p.feed.shift();
+      }
+      break;
+    }
+    case "agent_warning":
+      toast(d.message, true);
+      break;
+    case "agent_complete": {
+      const p = g.panels[d.test_type];
+      if (p) Object.assign(p, { state: "done", total: d.total, subtypes: d.subtypes, generator: d.generator });
+      break;
+    }
+    case "generation_complete":
+      g.running = false;
+      g.complete = d;
+      break;
+    case "generation_error":
+      g.running = false;
+      g.error = d.error;
+      break;
+  }
+}
+
+function paintGen() {
+  if (state.tab === "generate") {
+    const btn = $("#runGen");
+    if (btn) {
+      btn.disabled = state.gen.running || !can("qa_lead");
+      btn.textContent = state.gen.running ? "Generating..." : "Generate";
+    }
+    renderGenOutput();
+  }
+}
+
+async function startGeneration() {
+  const selected = $$('input[name="gtype"]:checked').map((i) => i.value);
+  if (!selected.length) return toast("Pick at least one test type.", true);
+  const mode = $('input[name="gmode"]:checked').value;
+  const max = $("#gMax").value ? Number($("#gMax").value) : null;
+  const info = providerInfo(state.llm.provider);
+  const live = info.id !== "rules";
+  if (live && !state.llm.key.trim() && !info.server_key) return toast(`Paste your ${info.label} API key first, or switch to the built-in rules.`, true);
+  const body = { selected_test_types: selected, mode, max_tcs: max, provider: info.id };
+  if (live) {
+    if (state.llm.key.trim()) body.api_key = state.llm.key.trim();
+    if (state.llm.model.trim()) body.model = state.llm.model.trim();
+  }
+  resetGen();
+  try {
+    await api(`/api/cycles/${state.cycleId}/generate`, { method: "POST", body });
+  } catch (err) {
+    return toast(err.message, true);
+  }
+  state.gen.running = true;
+  paintGen();
+  await openStream();
+}
+
+async function openStream() {
+  stopStream();
+  const abort = new AbortController();
+  state.streamAbort = abort;
+  const cycleId = state.cycleId;
+  try {
+    const res = await fetch(`/api/cycles/${cycleId}/generate/stream`, { headers: { Authorization: `Bearer ${state.token}` }, signal: abort.signal });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    resetGen();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const line = frame.split("\n").find((l) => l.startsWith("data: "));
+        if (!line) continue;
+        handleEvent(JSON.parse(line.slice(6)));
+        paintGen();
+      }
+    }
+  } catch (err) {
+    if (err.name !== "AbortError") toast("Lost the live connection: " + err.message, true);
+  } finally {
+    if (state.streamAbort === abort) state.streamAbort = null;
+    if (state.gen.complete || state.gen.error) await refreshCycle();
+  }
+}
+
+function stopStream() {
+  if (state.streamAbort) state.streamAbort.abort();
+  state.streamAbort = null;
+}
+
+async function restoreGeneration() {
+  stopStream();
+  resetGen();
+  if (!state.cycleId) return;
+  const status = await api(`/api/cycles/${state.cycleId}/generate/status`);
+  if (!status.events.length) return;
+  if (status.active) {
+    openStream();
+  } else {
+    status.events.forEach(handleEvent);
+    paintGen();
+  }
+}
+
+async function checkKey() {
+  const info = providerInfo(state.llm.provider);
+  const msg = $("#gCheckMsg");
+  if (!state.llm.key.trim()) {
+    msg.className = "small error";
+    msg.textContent = info.server_key ? "The server key is used when this is empty." : "Paste a key first.";
+    return;
+  }
+  msg.className = "small muted";
+  msg.textContent = "Checking...";
+  try {
+    const body = { provider: info.id, api_key: state.llm.key.trim() };
+    if (state.llm.model.trim()) body.model = state.llm.model.trim();
+    const res = await api("/api/llm/check", { method: "POST", body });
+    msg.className = "small ok-text";
+    msg.textContent = `Works. ${res.model} answered in ${res.latency_ms} ms.`;
+  } catch (err) {
+    msg.className = "small error";
+    msg.textContent = err.message;
+  }
+}
+
+// ------------------------------------------------------------------ review
+
+function filteredCases() {
+  const f = state.filters;
+  return state.cases.filter(
+    (c) =>
+      (!f.type || c.test_type === f.type) &&
+      (!f.status || c.status === f.status) &&
+      (!f.stale || c.stale) &&
+      (!f.req || c.req_links.some((l) => l.code === f.req)) &&
+      (!f.q || c.title.toLowerCase().includes(f.q.toLowerCase()) || c.tc_code.toLowerCase().includes(f.q.toLowerCase()))
+  );
+}
+
+function renderReview() {
+  const f = state.filters;
+  const reviewer = can("tester");
+  const rows = filteredCases();
+  const visible = new Set(rows.map((c) => c.id));
+  [...state.selected].forEach((id) => !visible.has(id) && state.selected.delete(id));
+  const allSelected = rows.length > 0 && rows.every((c) => state.selected.has(c.id));
+  $("#tab-review").innerHTML = `
+    <div class="page-head"><div><h2>Review</h2><div class="muted">${state.cases.length} test cases. Nothing moves on until a person approves it.</div></div>
+      ${can("qa_lead") ? '<div class="toolbar"><button class="btn" data-export="approved">Export approved (CSV)</button><button class="btn" data-export="">Export all</button></div>' : ""}</div>
+    <div class="toolbar">
+      <select id="fType"><option value="">All types</option>${Object.keys(TYPE_INFO).map((t) => `<option value="${t}" ${f.type === t ? "selected" : ""}>${cap(t)}</option>`).join("")}</select>
+      <select id="fStatus"><option value="">All statuses</option>${["pending", "approved", "rejected"].map((t) => `<option value="${t}" ${f.status === t ? "selected" : ""}>${cap(t)}</option>`).join("")}</select>
+      <input id="fQ" class="grow" placeholder="Search title or code" value="${esc(f.q)}" />
+      <label class="type-option" style="grid-template-columns:auto auto;align-items:center;padding:0"><input type="checkbox" id="fStale" ${f.stale ? "checked" : ""}/> Stale only</label>
+      ${f.req ? `<span class="pill info">Requirement ${esc(f.req)} <a href="#" data-clearreq>clear</a></span>` : ""}
+    </div>
+    <div class="table-wrap"><table><thead><tr>${reviewer ? `<th><input type="checkbox" id="selAll" aria-label="Select all" ${allSelected ? "checked" : ""}/></th>` : ""}<th>ID</th><th>Test case</th><th>Type</th><th>Priority</th><th>Status</th><th>Requirements</th></tr></thead>
+    <tbody>${
+      rows.length
+        ? rows
+            .map(
+              (c) => `<tr class="clickable" data-open="${c.id}">
+        ${reviewer ? `<td><input type="checkbox" data-sel="${c.id}" ${state.selected.has(c.id) ? "checked" : ""} aria-label="Select ${esc(c.tc_code)}"/></td>` : ""}
+        <td class="nowrap"><b>${esc(c.tc_code)}</b></td>
+        <td>${esc(c.title)}${c.stale ? ' <span class="pill warn">stale</span>' : ""}</td>
+        <td><span class="pill">${esc(c.test_type)}</span></td>
+        <td><span class="pill ${c.priority === "critical" ? "bad" : c.priority === "high" ? "warn" : ""}">${esc(c.priority)}</span></td>
+        <td>${statusPill(c.status)}</td>
+        <td class="nowrap">${c.req_links.map((l) => esc(l.code)).join(", ")}</td></tr>`
+            )
+            .join("")
+        : `<tr><td colspan="7" class="empty">${state.cases.length ? "No test cases match these filters." : "No test cases yet. Generate some first."}</td></tr>`
+    }</tbody></table></div>
+    ${state.selected.size ? `<div class="bulkbar"><b>${state.selected.size} selected</b><span style="flex:1"></span><button class="btn ok" data-bulk="approved">Approve</button><button class="btn bad" data-bulk="rejected">Reject</button><button class="btn" data-bulk="pending">Reset</button><button class="btn" data-bulk-clear>Clear</button></div>` : ""}`;
+}
+
+function openDrawer(caseId) {
+  api(`/api/cycles/${state.cycleId}/test-cases/${caseId}`).then((c) => {
+    const reviewer = can("tester");
+    const d = $("#drawer");
+    d.innerHTML = `
+      <div style="display:flex;justify-content:space-between;gap:12px"><div class="muted">${esc(c.tc_code)}</div><button class="btn small" data-close-drawer>Close</button></div>
+      <h2>${esc(c.title)}</h2>
+      <div class="meta"><span class="pill">${esc(c.test_type)}</span><span class="pill">${esc(c.subtype)}</span><span class="pill ${c.priority === "critical" ? "bad" : c.priority === "high" ? "warn" : ""}">${esc(c.priority)}</span>${statusPill(c.status)}${c.stale ? '<span class="pill warn">stale</span>' : ""}</div>
+      ${c.req_links.map((l) => `<div class="small ${l.stale ? "" : "muted"}">Covers <b>${esc(l.code)}</b> ${esc(l.title)} · written against v${l.written_against}${l.stale ? ` <span class="pill warn">requirement is now v${l.current_version}</span>` : ""}</div>`).join("")}
+      ${c.preconditions.length ? `<h3 style="margin-top:14px">Preconditions</h3><ul>${c.preconditions.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
+      <h3 style="margin-top:14px">Steps</h3>
+      <div class="table-wrap"><table><thead><tr><th>#</th><th>Action</th><th>Expected result</th></tr></thead><tbody>${c.steps.map((s) => `<tr><td>${s.seq}</td><td>${esc(s.action)}</td><td>${esc(s.expected)}</td></tr>`).join("")}</tbody></table></div>
+      ${c.test_data.length ? `<h3 style="margin-top:14px">Test data</h3><div class="table-wrap"><table><thead><tr><th>Field</th><th>Value</th><th>Step</th></tr></thead><tbody>${c.test_data.map((t) => `<tr><td>${esc(t.field_name)}</td><td><code>${esc(t.value)}</code></td><td>${t.step_seq ?? ""}</td></tr>`).join("")}</tbody></table></div>` : ""}
+      ${c.reviewed_by ? `<p class="muted small">Last reviewed by ${esc(c.reviewed_by)}${c.review_notes ? `: ${esc(c.review_notes)}` : ""}</p>` : ""}
+      ${reviewer ? `<h3 style="margin-top:14px">Decision</h3><textarea id="reviewNotes" rows="2" placeholder="Notes (optional)">${esc(c.review_notes || "")}</textarea>
+        <div class="actions"><button class="btn ok" data-decide="approved" data-id="${c.id}">Approve</button><button class="btn bad" data-decide="rejected" data-id="${c.id}">Reject</button><button class="btn" data-decide="pending" data-id="${c.id}">Reset</button></div>` : '<p class="muted small">Your role can read but not review.</p>'}`;
+    d.classList.remove("hidden");
+  }).catch((err) => toast(err.message, true));
+}
+
+async function decide(ids, status, notes) {
+  try {
+    if (ids.length === 1 && notes !== undefined) {
+      await api(`/api/cycles/${state.cycleId}/test-cases/${ids[0]}`, { method: "PATCH", body: { status, review_notes: notes } });
+    } else {
+      await api(`/api/cycles/${state.cycleId}/test-cases`, { method: "PATCH", body: { tc_ids: ids, status } });
+    }
+    toast(`${ids.length} test case(s) ${status === "pending" ? "reset" : status}.`);
+    state.selected.clear();
+    $("#drawer").classList.add("hidden");
+    await refreshCycle();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function exportCsv(status) {
+  try {
+    const res = await api(`/api/cycles/${state.cycleId}/export/csv${status ? `?status=${status}` : ""}`, { raw: true });
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `cycle-${state.cycleId}-test-cases.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// ------------------------------------------------------------------ traceability
+
+async function renderTrace() {
+  const el = $("#tab-trace");
+  el.innerHTML = '<div class="muted">Loading...</div>';
+  const m = await api(`/api/cycles/${state.cycleId}/traceability`);
+  const s = m.summary;
+  const stateLabel = { covered: ["ok", "covered"], pending_review: ["warn", "needs review"], uncovered: ["bad", "no cases"] };
+  el.innerHTML = `
+    <div class="page-head"><div><h2>Traceability</h2><div class="muted">A requirement counts as covered once at least one linked case is approved.</div></div></div>
+    <div class="grid kpis">
+      <div class="card kpi"><div class="value">${s.coverage_pct}%</div><div class="label">Covered</div></div>
+      <div class="card kpi"><div class="value">${s.covered}</div><div class="label">Covered requirements</div></div>
+      <div class="card kpi"><div class="value">${s.pending_review}</div><div class="label">Need review</div></div>
+      <div class="card kpi"><div class="value">${s.uncovered}</div><div class="label">No cases</div></div>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Type</th><th>Version</th><th>Cases by type</th><th>Review progress</th><th>State</th></tr></thead><tbody>${m.rows
+      .map((r) => {
+        const t = r.total || 1;
+        const [cls, label] = stateLabel[r.state];
+        return `<tr class="clickable" data-reqfilter="${esc(r.code)}">
+          <td><b>${esc(r.code)}</b> ${esc(r.title)}</td><td><span class="pill info">${esc(r.req_type)}</span></td><td>v${r.version}</td>
+          <td>${Object.entries(r.by_type).map(([k, v]) => `<span class="pill">${k} ${v}</span>`).join(" ") || '<span class="muted">none</span>'}</td>
+          <td><div class="stack" title="${r.statuses.approved} approved, ${r.statuses.pending} pending, ${r.statuses.rejected} rejected"><span class="a" style="width:${(100 * r.statuses.approved) / t}%"></span><span class="p" style="width:${(100 * r.statuses.pending) / t}%"></span><span class="r" style="width:${(100 * r.statuses.rejected) / t}%"></span></div>
+            <div class="muted small">${r.statuses.approved}/${r.total} approved${r.stale ? ` · <span class="pill warn">${r.stale} stale</span>` : ""}</div></td>
+          <td><span class="pill ${cls}">${label}</span></td></tr>`;
+      })
+      .join("")}</tbody></table></div>
+    <p class="muted small">Click a row to see its test cases in Review.</p>`;
+}
+
+// ------------------------------------------------------------------ roadmap
+
+async function renderRoadmap() {
+  const el = $("#tab-roadmap");
+  if (!renderRoadmap.data) {
+    el.innerHTML = '<div class="muted">Loading...</div>';
+    renderRoadmap.data = await fetch("/api/roadmap").then((r) => r.json());
+  }
+  const r = renderRoadmap.data;
+  const cols = [["shipped", "Built in this demo", "ok"], ["next", "Considering next", "info"], ["later", "Later", ""]];
+  el.innerHTML = `
+    <div class="page-head"><div><h2>Roadmap</h2><div class="muted" style="max-width:760px">${esc(r.intro)}</div></div></div>
+    <div class="road-cols">${cols
+      .map(
+        ([status, title, cls]) => `<div class="road-col"><h3>${title} <span class="pill ${cls}">${r.items.filter((i) => i.status === status).length}</span></h3>
+        ${r.items
+          .filter((i) => i.status === status)
+          .map((i) => `<div class="card road-item"><span class="pill">${esc(i.area)}</span>${i.effort ? ` <span class="pill">${esc(i.effort)}</span>` : ""}<h4>${esc(i.title)}</h4><p>${esc(i.summary)}</p><p class="why"><b>Why:</b> ${esc(i.why)}</p></div>`)
+          .join("")}</div>`
+      )
+      .join("")}</div>
+    <div class="card" style="margin-top:18px"><h3>Principles behind the list</h3><ul class="lessons">${r.principles.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>`;
+}
+
+// ------------------------------------------------------------------ modal helpers
+
+function openModal(html) {
+  $("#modalCard").innerHTML = html;
+  $("#modal").classList.remove("hidden");
+  $("#modalCard input, #modalCard textarea")?.focus();
+}
+function closeModal() {
+  $("#modal").classList.add("hidden");
+}
+
+// ------------------------------------------------------------------ events
+
+document.addEventListener("click", async (ev) => {
+  const t = ev.target.closest("button, a, tr[data-open], tr[data-reqfilter], .radio-card, [data-goto]");
+  if (!t) return;
+  const ds = t.dataset;
+
+  if (ds.email) return signIn(ds.email, "demo123");
+  if (t.closest("#tabs") && ds.tab) return setTab(ds.tab);
+  if (ds.goto) { ev.preventDefault(); return setTab(ds.goto); }
+  if (t.id === "logoutBtn") return signOut();
+  if (t.id === "newProjectBtn") {
+    openModal(`<h2>New project</h2><label>Name<input id="pName" /></label><label>Description<textarea id="pDesc" rows="2"></textarea></label><p id="modalError" class="error"></p>
+      <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="savePrj">Create</button></div>`);
+    $("#savePrj").onclick = async () => {
+      try {
+        const p = await api("/api/projects", { method: "POST", body: { name: $("#pName").value, description: $("#pDesc").value } });
+        closeModal();
+        state.projectId = p.id;
+        await loadProjects();
+        localStorage.setItem("trace_project", p.id);
+        toast("Project created. Add requirements to get started.");
+        setTab("requirements");
+      } catch (err) { $("#modalError").textContent = err.message; }
+    };
+    return;
+  }
+  if (t.id === "newCycleBtn") {
+    openModal(`<h2>New cycle</h2><label>Name<input id="cName" placeholder="Sprint 2" /></label><p id="modalError" class="error"></p>
+      <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="saveCyc">Create</button></div>`);
+    $("#saveCyc").onclick = async () => {
+      try {
+        const c = await api(`/api/projects/${state.projectId}/cycles`, { method: "POST", body: { name: $("#cName").value } });
+        closeModal();
+        await loadProjects();
+        await selectCycle(c.id);
+        toast("Cycle created.");
+      } catch (err) { $("#modalError").textContent = err.message; }
+    };
+    return;
+  }
+  if (ds.close !== undefined) return closeModal();
+  if (ds.closeDrawer !== undefined) return $("#drawer").classList.add("hidden");
+  if (t.id === "addReq") return openRequirementModal(null);
+  if (ds.edit) return openRequirementModal(state.reqs.find((r) => r.id === Number(ds.edit)));
+  if (ds.del) {
+    const req = state.reqs.find((r) => r.id === Number(ds.del));
+    if (!confirm(`Delete ${req.code}? Test cases that only cover it are deleted too.`)) return;
+    try { await api(`/api/cycles/${state.cycleId}/requirements/${req.id}`, { method: "DELETE" }); toast("Requirement deleted."); await refreshCycle(); }
+    catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (t.id === "runGen") return startGeneration();
+  if (t.id === "gCheck") return checkKey();
+  if (t.classList.contains("radio-card")) {
+    $$(".radio-card").forEach((c) => c.classList.toggle("on", c === t));
+    return;
+  }
+  if (ds.export !== undefined) return exportCsv(ds.export);
+  if (ds.bulk) return decide([...state.selected], ds.bulk);
+  if (ds.bulkClear !== undefined) { state.selected.clear(); return renderReview(); }
+  if (ds.clearreq !== undefined) { ev.preventDefault(); state.filters.req = ""; return renderReview(); }
+  if (ds.decide) {
+    const notes = $("#reviewNotes") ? $("#reviewNotes").value : undefined;
+    return decide([Number(ds.id)], ds.decide, notes);
+  }
+  if (ds.reqfilter) {
+    state.filters = { type: "", status: "", q: "", stale: false, req: ds.reqfilter };
+    return setTab("review");
+  }
+  if (ds.open && !ev.target.closest("input")) return openDrawer(Number(ds.open));
+});
+
+document.addEventListener("change", (ev) => {
+  const t = ev.target;
+  if (t.id === "projectSelect") { state.projectId = Number(t.value); const p = state.projects.find((x) => x.id === state.projectId); selectCycle(p.cycles[0]?.id); }
+  else if (t.id === "cycleSelect") selectCycle(Number(t.value));
+  else if (t.id === "gProvider") {
+    state.llm.provider = t.value;
+    state.llm.model = "";
+    localStorage.setItem("trace_provider", t.value);
+    $("#gCheckMsg").textContent = "";
+    $("#gModel").value = "";
+    syncGeneratorBox();
+  }
+  else if (t.id === "fType") { state.filters.type = t.value; renderReview(); }
+  else if (t.id === "fStatus") { state.filters.status = t.value; renderReview(); }
+  else if (t.id === "fStale") { state.filters.stale = t.checked; renderReview(); }
+  else if (t.id === "selAll") { filteredCases().forEach((c) => (t.checked ? state.selected.add(c.id) : state.selected.delete(c.id))); renderReview(); }
+  else if (t.dataset.sel) { t.checked ? state.selected.add(Number(t.dataset.sel)) : state.selected.delete(Number(t.dataset.sel)); renderReview(); }
+});
+
+document.addEventListener("input", (ev) => {
+  if (ev.target.id === "gKey") state.llm.key = ev.target.value;
+  else if (ev.target.id === "gModel") state.llm.model = ev.target.value;
+  if (ev.target.id === "fQ") {
+    state.filters.q = ev.target.value;
+    const pos = ev.target.selectionStart;
+    renderReview();
+    const box = $("#fQ");
+    box.focus();
+    box.setSelectionRange(pos, pos);
+  }
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { closeModal(); $("#drawer").classList.add("hidden"); }
+});
+
+$("#loginForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  signIn($("#loginEmail").value.trim().toLowerCase(), $("#loginPassword").value);
+});
+
+(async function boot() {
+  if (!state.token) return showLogin();
+  try { await startApp(); } catch (_) { signOut(); }
+})();
