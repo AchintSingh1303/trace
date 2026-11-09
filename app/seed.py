@@ -106,6 +106,21 @@ def seed_demo_project(db) -> None:
     db.commit()
 
 
+def bootstrap_admin() -> bool:
+    """Create the first admin from ADMIN_EMAIL / ADMIN_PASSWORD when the user table is empty."""
+    from .config import settings
+
+    if not (settings.admin_email and settings.admin_password):
+        return False
+    with SessionLocal() as db:
+        if db.scalar(select(User.id)):
+            return False
+        salt = new_salt()
+        db.add(User(email=settings.admin_email, name="Administrator", role="admin", salt=salt, password_hash=hash_password(settings.admin_password, salt)))
+        db.commit()
+    return True
+
+
 def seed(with_project: bool = True) -> None:
     init_db()
     with SessionLocal() as db:

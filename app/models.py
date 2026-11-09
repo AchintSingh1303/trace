@@ -102,6 +102,12 @@ class TestCase(Base):
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The sentence in the requirement this case verifies, and any grounding warnings.
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    warnings: Mapped[list] = mapped_column(JSON, default=list)
+    # Who wrote it: rules, anthropic, openai or rules-fallback. `edited` marks human corrections.
+    source: Mapped[str] = mapped_column(String(30), default="rules")
+    edited: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     steps: Mapped[list["TCStep"]] = relationship(
@@ -148,6 +154,20 @@ class Traceability(Base):
     req_version: Mapped[int] = mapped_column(Integer, default=1)
     # The requirement the case was generated for. Other links are "also covers".
     is_primary: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class KnowledgeItem(Base):
+    """Project-level facts the generators must respect: terms, business rules and things to avoid."""
+
+    __tablename__ = "knowledge_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))  # glossary | rule | avoid
+    title: Mapped[str] = mapped_column(String(200))
+    content: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class AuditLog(Base):

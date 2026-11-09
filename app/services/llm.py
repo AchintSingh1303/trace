@@ -54,6 +54,10 @@ TOOL_SCHEMA = {
                     "subtype": {"type": "string"},
                     "priority": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
                     "req_codes": {"type": "array", "items": {"type": "string"}},
+                    "evidence": {
+                        "type": "string",
+                        "description": "An exact quote from the requirement or acceptance criteria that this case verifies.",
+                    },
                     "preconditions": {"type": "array", "items": {"type": "string"}},
                     "steps": {
                         "type": "array",
@@ -76,17 +80,35 @@ TOOL_SCHEMA = {
                         },
                     },
                 },
-                "required": ["title", "priority", "req_codes", "steps"],
+                "required": ["title", "priority", "req_codes", "evidence", "steps"],
             },
-        }
+        },
+        "clarifications": {
+            "type": "array",
+            "description": "Questions about ambiguous or missing detail. Ask instead of guessing.",
+            "items": {
+                "type": "object",
+                "properties": {"req_code": {"type": "string"}, "question": {"type": "string"}},
+                "required": ["req_code", "question"],
+            },
+        },
     },
     "required": ["test_cases"],
 }
 
 SYSTEM_PROMPT = (
     "You are a senior QA engineer. Write precise, independent, executable test cases. "
-    "One action per step, each with an observable expected result. Every case must reference "
-    f"the requirement codes it covers. Always answer by calling {TOOL_NAME}."
+    "One action per step, each with an observable expected result.\n"
+    "Ground rules:\n"
+    "- Use O\nY facts stated in the requirements and the project knowledge. Do not invent "
+    "endpoints, field names, limits, messages or behaviour.\n"
+    "- Every case needs `evidence`: an exact quote from the requirement or its acceptance "
+    "criteria that the case verifies. If you cannot quote one, do not write the case.\n"
+    "- If a requirement is ambiguous or lacks a detail you need (a limit, a message, a rule), "
+    "add a clarification question for it instead of guessing.\n"
+    "- Project knowledge is authoritative. Follow its terms and rules, and never do what the "
+    "'avoid' notes say.\n"
+    f"Always answer by calling {TOOL_NAME}."
 )
 
 
@@ -211,7 +233,25 @@ def _extract_tool_input(cfg: LLMConfig, data: dict) -> dict:
 # ---------------------------------------------------------------------------- public API
 
 
-def build_prompt(agent: str, targets: list[ReqView], project: ProjectView) -> str:
+@dataclass
+class Guidance:
+    """What the project has taught the generator: facts, approved examples, and past mistakes."""
+
+    knowledge: list[dict] = field(default_factory=list)  # {kind, title, content}
+    examples: list[dict] = field(default_factory=list)  # approved or corrected cases of this test type
+    avoid: list[dict] = field(default_factory=list)  # rejected cases with the reviewer's reason
+
+    def knowledge_text(self) -> str:
+        return " ".join(f"{k['title']} {k['content']}" for k in self.knowledge)
+
+
+@dataclass
+class LLMResult:
+    cases: list[Case]
+    clarifications: list[dict] = field(default_factory=list)
+
+
+def build_prompt(agent: str, targets: list[ReqView], project: ProjectView, guidance: Guidance | None = None) -> str:
     payload = [
         {
             "code": r.code,
@@ -222,13 +262,23 @@ def build_prompt(agent: str, targets: list[ReqView], project: ProjectView) -> st
         }
         for r in targets
     ]
-    return (
-        f"Project: {project.name} ({project.app_type}). {project.description}\n"
-        f"Generate {agent} test cases for these requirements:\n{json.dumps(payload, indent=2)}"
-    )
+    parts = [f"Project: {project.name} ({project.app_type}). {project.description}"]
+    if guidance and guidance.knowledge:
+        lines = [f"- [{k['kind']}] {k['title']}: {k['content']}" for k in guidance.knowledge]
+        parts.append("Project knowledge (authoritative):\n" + "\n".join(lines))
+    if guidance and guidance.examples:
+        parts.append(
+            "Cases your reviewers approved or corrected. Match their style, depth and wording:\n"
+            + json.dumps(guidance.examples, indent=2)
+        )
+    if guidance and guidance.avoid:
+        lines = [f"- {a['title']} (reviewer said: {a['reason']})" for a in guidance.avoid]
+        parts.append("Cases your reviewers rejected. Do not repeat these mistakes:\n" + "\n".join(lines))
+    parts.append(f"Generate {agent} test cases for these requirements:\n{json.dumps(payload, indent=2)}")
+    return "\n\n".join(parts)
 
 
-def parse_tool_input(payload: dict, test_type: str, allowed_codes: set[str]) -> list[Case]:
+def parse_tool_input(payload: dict, test_type: str, allowed_codes: set[str], source: str = "llm") -> list[Case]:
     cases: list[Case] = []
     for raw in payload.get("test_cases", []):
         title = str(raw.get("title", "")).strip()
@@ -258,18 +308,33 @@ def parse_tool_input(payload: dict, test_type: str, allowed_codes: set[str]) -> 
                 req_codes=codes,
                 preconditions=[str(p) for p in raw.get("preconditions", [])],
                 test_data=test_data,
+                evidence=str(raw.get("evidence", "") or "").strip()[:1000],
+                source=source,
             )
         )
     return cases
 
 
-def generate_with_llm(agent: str, targets: list[ReqView], project: ProjectView, cfg: LLMConfig) -> list[Case]:
-    user = build_prompt(agent, targets, project)
+def parse_clarifications(payload: dict, allowed_codes: set[str]) -> list[dict]:
+    out = []
+    for raw in payload.get("clarifications", []) or []:
+        code, question = str(raw.get("req_code", "")), str(raw.get("question", "")).strip()
+        if code in allowed_codes and question:
+            out.append({"req_code": code, "question": question[:400]})
+    return out
+
+
+def generate_with_llm(
+    agent: str, targets: list[ReqView], project: ProjectView, cfg: LLMConfig, guidance: Guidance | None = None
+) -> LLMResult:
+    user = build_prompt(agent, targets, project, guidance)
     if cfg.provider == "anthropic":
         data = _anthropic_call(cfg, SYSTEM_PROMPT, user, with_tool=True, max_tokens=8000)
     else:
         data = _openai_call(cfg, SYSTEM_PROMPT, user, with_tool=True)
-    return parse_tool_input(_extract_tool_input(cfg, data), agent, {r.code for r in targets})
+    payload = _extract_tool_input(cfg, data)
+    codes = {r.code for r in targets}
+    return LLMResult(parse_tool_input(payload, agent, codes, source=cfg.provider), parse_clarifications(payload, codes))
 
 
 def check_connection(cfg: LLMConfig) -> dict:

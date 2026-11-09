@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..db import get_db
 from ..models import User
 from ..schemas import LoginBody
@@ -29,5 +30,7 @@ def me(user: User = Depends(get_current_user)):
 
 @router.get("/demo-users")
 def demo_users(db: Session = Depends(get_db)):
-    """Lets the login screen offer one-click demo accounts. Remove for real deployments."""
+    """Lets the login screen offer one-click demo accounts. Empty unless SEED_DEMO=1."""
+    if not settings.seed_demo:
+        return []
     return [user_dict(u) for u in db.scalars(select(User).order_by(User.id))]

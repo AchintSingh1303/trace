@@ -1,0 +1,62 @@
+{
+  "project": {"name": "Library Desk", "app_type": "web", "description": "A web app where members borrow books and staff manage the catalogue."},
+  "requirements": [
+    {
+      "code": "RQ-001", "agent": "functional", "type": "Functional",
+      "title": "Borrow a book",
+      "description": "A signed-in member borrows an available book for 14 days.",
+      "acceptance_criteria": [
+        "An available book can be borrowed and shows a due date 14 days away",
+        "A member cannot borrow more than 5 books at once",
+        "A book that is already on loan cannot be borrowed"
+      ],
+      "must_cover": ["14 days", "5 books", "on loan"],
+      "forbidden": ["late fee", "renewal", "reserve"]
+    },
+    {
+      "code": "RQ-002", "agent": "functional", "type": "Functional",
+      "title": "Member sign in",
+      "description": "Members sign in with a library card number and a PIN.",
+      "acceptance_criteria": [
+        "Valid card number and PIN open the member home page",
+        "A wrong PIN shows an error and does not reveal whether the card exists",
+        "Three wrong PINs in a row lock the card for 15 minutes"
+      ],
+      "must_cover": ["pin", "lock", "15 minutes"],
+      "forbidden": ["email", "captcha", "two-factor"]
+    },
+    {
+      "code": "RQ-003", "agent": "api", "type": "API",
+      "title": "GET /books/{id} returns a book",
+      "description": "Returns the title, author and availability of one book. GET /books/{id}",
+      "acceptance_criteria": [
+        "An existing id returns 200 with title, author and availability",
+        "An unknown id returns 404"
+      ],
+      "must_cover": ["404", "availability"],
+      "forbidden": ["/api/v2", "isbn", "publisher"]
+    },
+    {
+      "code": "RQ-004", "agent": "security", "type": "Security",
+      "title": "Member data access",
+      "description": "Members can only see their own loans.",
+      "acceptance_criteria": [
+        "A member cannot open another member loan history",
+        "Sessions end after 20 minutes of inactivity"
+      ],
+      "must_cover": ["another member", "20 minutes"],
+      "forbidden": ["admin panel", "oauth"]
+    },
+    {
+      "code": "RQ-005", "agent": "performance", "type": "Performance",
+      "title": "Catalogue search speed",
+      "description": "Catalogue search must stay fast under load: p95 under 600 ms at 100 concurrent users.",
+      "acceptance_criteria": [
+        "Catalogue search p95 latency is under 600 ms at 100 concurrent users"
+      ],
+      "must_cover": ["600 ms", "100"],
+      "forbidden": ["cdn", "kubernetes"]
+    }
+  ],
+  "thresholds": {"criteria_coverage": 0.8, "must_cover": 0.8, "max_forbidden": 0, "max_ungrounded_rate": 0.1}
+}

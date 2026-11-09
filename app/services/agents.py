@@ -123,6 +123,9 @@ class Case:
     req_codes: list[str]
     preconditions: list[str] = field(default_factory=list)
     test_data: list[dict] = field(default_factory=list)
+    evidence: str = ""
+    warnings: list[str] = field(default_factory=list)
+    source: str = "rules"
 
     @property
     def tag(self) -> str:

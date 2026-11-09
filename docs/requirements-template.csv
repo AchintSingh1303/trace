@@ -1,0 +1,3 @@
+code,type,title,description,acceptance_criteria
+RQ-001,Functional,User login,Registered users sign in with email and password,"A valid user reaches the dashboard|A wrong password shows an error|The account locks after 5 failed attempts"
+RQ-002,API,GET /status,Returns the service status,"A healthy service returns 200"

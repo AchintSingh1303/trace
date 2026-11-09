@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ..db import get_db
-from ..models import AuditLog, Cycle, TestCase, User
-from ..schemas import BulkReviewBody, ReviewBody
+from ..models import AuditLog, Cycle, TCStep, TestCase, User
+from ..schemas import BulkReviewBody, CaseEdit, ReviewBody
 from ..security import get_current_user, require_role
 from ..services.reporting import _load_req_map, export_csv, list_cases, tc_to_dict, traceability_matrix
 
@@ -53,6 +53,32 @@ def review_case(cycle_id: int, tc_id: int, body: ReviewBody, db: Session = Depen
     _apply_review(tc, body, user)
     db.add(AuditLog(cycle_id=cycle_id, actor=user.email, action=f"testcase.{body.status}", entity="test_case", entity_id=tc.tc_code, details={"notes": body.review_notes}))
     db.commit()
+    return get_case(cycle_id, tc_id, db, user)
+
+
+@router.put("/test-cases/{tc_id}")
+def edit_case(cycle_id: int, tc_id: int, body: CaseEdit, db: Session = Depends(get_db), user: User = Depends(require_role("tester"))):
+    """A reviewer corrects a case. Corrected cases become the strongest examples for later generations."""
+    tc = db.scalar(select(TestCase).where(TestCase.id == tc_id, TestCase.cycle_id == cycle_id).options(selectinload(TestCase.steps)))
+    if not tc:
+        raise HTTPException(404, "Test case not found")
+    changed = []
+    if body.title is not None and body.title.strip() != tc.title:
+        tc.title, changed = body.title.strip(), changed + ["title"]
+    if body.priority is not None and body.priority != tc.priority:
+        tc.priority, changed = body.priority, changed + ["priority"]
+    if body.preconditions is not None:
+        tc.preconditions = [p.strip() for p in body.preconditions if p.strip()]
+        changed.append("preconditions")
+    if body.steps is not None:
+        # replacing the collection lets delete-orphan remove the old rows and keeps the loaded state correct
+        tc.steps = [TCStep(seq=seq, action=s["action"], expected=s["expected"]) for seq, s in enumerate(body.steps, start=1)]
+        changed.append("steps")
+    if changed:
+        tc.edited = True
+        tc.warnings = []  # a person has now read and corrected it
+        db.add(AuditLog(cycle_id=cycle_id, actor=user.email, action="testcase.edit", entity="test_case", entity_id=tc.tc_code, details={"fields": changed}))
+        db.commit()
     return get_case(cycle_id, tc_id, db, user)
 
 

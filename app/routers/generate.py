@@ -41,7 +41,7 @@ async def generate(cycle_id: int, body: GenerateBody, db: Session = Depends(get_
     db.commit()
 
     bus.start(cycle_id)
-    start_generation(cycle_id, run.id, body.selected_test_types, body.mode, body.max_tcs, user.email, llm_config)
+    start_generation(cycle_id, run.id, body.selected_test_types, body.mode, body.max_tcs, user.email, llm_config, body.strict_grounding)
     return {
         "cycle_id": cycle_id,
         "run_id": run.id,

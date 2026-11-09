@@ -73,6 +73,8 @@ class GenerateBody(BaseModel):
     provider: Literal["rules", "anthropic", "openai"] | None = None
     api_key: str | None = Field(default=None, max_length=400, repr=False)
     model: str | None = Field(default=None, max_length=100)
+    # Strict grounding also drops cases that mention endpoints or fields the requirement never names.
+    strict_grounding: bool = False
 
     @field_validator("selected_test_types")
     @classmethod
@@ -96,3 +98,48 @@ class ReviewBody(BaseModel):
 
 class BulkReviewBody(ReviewBody):
     tc_ids: list[int] = Field(min_length=1)
+
+
+class CaseEdit(BaseModel):
+    """A reviewer's correction to a generated case."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    priority: Literal["critical", "high", "medium", "low"] | None = None
+    preconditions: list[str] | None = None
+    steps: list[dict] | None = None
+
+    @field_validator("steps")
+    @classmethod
+    def _steps(cls, value):
+        if value is None:
+            return None
+        clean = [
+            {"action": str(s.get("action", "")).strip(), "expected": str(s.get("expected", "")).strip()}
+            for s in value
+            if str(s.get("action", "")).strip()
+        ]
+        if not clean:
+            raise ValueError("A test case needs at least one step")
+        return clean
+
+
+class KnowledgeCreate(BaseModel):
+    kind: Literal["glossary", "rule", "avoid"]
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class ImportBody(BaseModel):
+    csv: str = Field(min_length=1, max_length=2_000_000)
+
+
+class UserCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    name: str = Field(min_length=1, max_length=120)
+    role: Literal["viewer", "tester", "qa_lead", "admin"]
+    password: str = Field(min_length=8, max_length=200, repr=False)
+
+
+class UserUpdate(BaseModel):
+    role: Literal["viewer", "tester", "qa_lead", "admin"] | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=200, repr=False)

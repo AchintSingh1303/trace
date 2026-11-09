@@ -25,7 +25,8 @@ const state = {
   tab: "overview",
   providers: [],
   // The API key lives here, in memory only. It is never put in localStorage or the URL.
-  llm: { provider: null, model: "", key: "" },
+  llm: { provider: null, model: "", key: "", strict: false },
+  knowledge: [],
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -69,7 +70,9 @@ async function showLogin() {
   $("#app").classList.add("hidden");
   $("#login").classList.remove("hidden");
   try {
-    const users = await fetch("/api/auth/demo-users").then((r) => r.json());
+    const cfg = await fetch("/api/config").then((r) => r.json());
+    $(".demo-users").hidden = !cfg.demo;
+    const users = cfg.demo ? await fetch("/api/auth/demo-users").then((r) => r.json()) : [];
     $("#demoUsers").innerHTML = users
       .map((u) => `<button type="button" class="chip" data-email="${esc(u.email)}">${esc(u.name)} (${esc(u.role)})</button>`)
       .join("");
@@ -189,11 +192,11 @@ function renderAll() {
 }
 
 function renderTab(tab) {
-  if (!state.cycleId && tab !== "roadmap") {
+  if (!state.cycleId && tab !== "roadmap" && tab !== "team") {
     $(`#tab-${tab}`).innerHTML = `<div class="card empty">No project yet. Create one to get started.</div>`;
     return;
   }
-  ({ overview: renderOverview, requirements: renderRequirements, generate: renderGenerate, review: renderReview, trace: renderTrace, roadmap: renderRoadmap }[tab])();
+  ({ overview: renderOverview, requirements: renderRequirements, generate: renderGenerate, review: renderReview, knowledge: renderKnowledge, team: renderTeam, trace: renderTrace, roadmap: renderRoadmap }[tab])();
 }
 
 // ------------------------------------------------------------------ overview
@@ -253,7 +256,7 @@ function renderRequirements() {
   $("#tab-requirements").innerHTML = `
     <div class="page-head"><div><h2>Requirements</h2>
       <div class="muted">Editing a requirement bumps its version and marks linked test cases stale.</div></div>
-      ${editable ? '<button class="btn primary" id="addReq">Add requirement</button>' : ""}</div>
+      ${editable ? '<div class="actions" style="margin:0"><button class="btn" id="importReq">Import CSV</button><button class="btn primary" id="addReq">Add requirement</button></div>' : ""}</div>
     <div class="table-wrap"><table><thead><tr><th>Code</th><th>Type</th><th>Requirement</th><th>Criteria</th><th>Version</th><th>Test cases</th>${editable ? "<th></th>" : ""}</tr></thead>
     <tbody>${
       state.reqs.length
@@ -328,6 +331,7 @@ function renderGenerate() {
           <label>API key<input id="gKey" type="password" autocomplete="off" spellcheck="false" /></label>
           <label>Model <span class="muted">(edit if your account uses another)</span><input id="gModel" autocomplete="off" spellcheck="false" value="${esc(state.llm.model)}" /></label>
           <div class="keyrow"><button class="btn small" id="gCheck" type="button" ${canRun ? "" : "disabled"}>Test key</button><span id="gCheckMsg" class="small"></span></div>
+          <label class="type-option"><input type="checkbox" id="gStrict" ${state.llm.strict ? "checked" : ""} /><span><b>Strict grounding</b><span class="muted">Also drop cases that mention endpoints or fields the requirement never names. Cases without a real quote from the requirement are always dropped.</span></span></label>
           <p class="muted small">Sent with the Generate request, used for that run only, and never stored, logged or shown again. It is forgotten when you sign out or reload.</p>
         </div>
         <h3 style="margin-top:14px">Test types</h3>
@@ -377,6 +381,9 @@ function renderGenOutput() {
     const gaps = c.coverage_gaps || [];
     done = `<div class="notice ok"><b>${c.total} test cases created</b> in ${c.elapsed_s}s${c.deleted ? `, replacing ${c.deleted}` : ""}${c.replaced_approved ? ` (${c.replaced_approved} of them were already approved and need re-review)` : ""}.
       <a href="#" data-goto="review">Review them</a></div>
+      ${c.dropped ? `<div class="notice warn"><b>${c.dropped} generated case(s) were dropped</b> because they were not backed by a quote from your requirements. Nothing invented reached the review queue.</div>` : ""}
+      ${c.warned ? `<div class="notice warn">${c.warned} case(s) mention terms that are not in the requirements or project knowledge. They are flagged in Review.</div>` : ""}
+      ${(c.clarifications || []).length ? `<div class="notice"><b>The model asked ${c.clarifications.length} question(s) instead of guessing:</b><ul style="margin:6px 0 0 18px;padding:0">${c.clarifications.map((q) => `<li>${esc(q.req_code)}: ${esc(q.question)}</li>`).join("")}</ul><div class="muted small" style="margin-top:6px">Answer them in the requirement text or add a rule in the Knowledge tab, then generate again.</div></div>` : ""}
       ${gaps.length ? `<div class="notice warn"><b>${gaps.length} requirement(s) have no test cases:</b><ul style="margin:6px 0 0 18px;padding:0">${gaps.map((x) => `<li>${esc(x.code)} ${esc(x.title)} <span class="muted">(${x.reason === "agent_not_selected" ? "needs the " + x.missing_agents.join(" or ") + " agent" : "no cases generated"})</span></li>`).join("")}</ul></div>` : ""}`;
   }
   out.innerHTML = `${head}${done}<div class="agents">${panels}</div>`;
@@ -449,6 +456,7 @@ async function startGeneration() {
   if (live && !state.llm.key.trim() && !info.server_key) return toast(`Paste your ${info.label} API key first, or switch to the built-in rules.`, true);
   const body = { selected_test_types: selected, mode, max_tcs: max, provider: info.id };
   if (live) {
+    body.strict_grounding = !!state.llm.strict;
     if (state.llm.key.trim()) body.api_key = state.llm.key.trim();
     if (state.llm.model.trim()) body.model = state.llm.model.trim();
   }
@@ -588,22 +596,26 @@ function renderReview() {
     ${state.selected.size ? `<div class="bulkbar"><b>${state.selected.size} selected</b><span style="flex:1"></span><button class="btn ok" data-bulk="approved">Approve</button><button class="btn bad" data-bulk="rejected">Reject</button><button class="btn" data-bulk="pending">Reset</button><button class="btn" data-bulk-clear>Clear</button></div>` : ""}`;
 }
 
-function openDrawer(caseId) {
+function openDrawer(caseId, editing = false) {
   api(`/api/cycles/${state.cycleId}/test-cases/${caseId}`).then((c) => {
     const reviewer = can("tester");
     const d = $("#drawer");
+    state.drawerCase = c;
+    if (editing) return renderDrawerEditor(c, d);
     d.innerHTML = `
       <div style="display:flex;justify-content:space-between;gap:12px"><div class="muted">${esc(c.tc_code)}</div><button class="btn small" data-close-drawer>Close</button></div>
       <h2>${esc(c.title)}</h2>
-      <div class="meta"><span class="pill">${esc(c.test_type)}</span><span class="pill">${esc(c.subtype)}</span><span class="pill ${c.priority === "critical" ? "bad" : c.priority === "high" ? "warn" : ""}">${esc(c.priority)}</span>${statusPill(c.status)}${c.stale ? '<span class="pill warn">stale</span>' : ""}</div>
+      <div class="meta"><span class="pill ${c.source === "rules" ? "" : "info"}">${esc(c.source)}</span>${c.edited ? '<span class="pill ok">corrected by a person</span>' : ""}<span class="pill">${esc(c.test_type)}</span><span class="pill">${esc(c.subtype)}</span><span class="pill ${c.priority === "critical" ? "bad" : c.priority === "high" ? "warn" : ""}">${esc(c.priority)}</span>${statusPill(c.status)}${c.stale ? '<span class="pill warn">stale</span>' : ""}</div>
       ${c.req_links.map((l) => `<div class="small ${l.stale ? "" : "muted"}">Covers <b>${esc(l.code)}</b> ${esc(l.title)} · written against v${l.written_against}${l.stale ? ` <span class="pill warn">requirement is now v${l.current_version}</span>` : ""}</div>`).join("")}
+      ${c.evidence ? `<div class="evidence"><div class="muted small">Backed by this part of the requirement</div>${esc(c.evidence)}</div>` : ""}
+      ${(c.warnings || []).map((w) => `<div class="notice warn">${esc(w)}</div>`).join("")}
       ${c.preconditions.length ? `<h3 style="margin-top:14px">Preconditions</h3><ul>${c.preconditions.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
       <h3 style="margin-top:14px">Steps</h3>
       <div class="table-wrap"><table><thead><tr><th>#</th><th>Action</th><th>Expected result</th></tr></thead><tbody>${c.steps.map((s) => `<tr><td>${s.seq}</td><td>${esc(s.action)}</td><td>${esc(s.expected)}</td></tr>`).join("")}</tbody></table></div>
       ${c.test_data.length ? `<h3 style="margin-top:14px">Test data</h3><div class="table-wrap"><table><thead><tr><th>Field</th><th>Value</th><th>Step</th></tr></thead><tbody>${c.test_data.map((t) => `<tr><td>${esc(t.field_name)}</td><td><code>${esc(t.value)}</code></td><td>${t.step_seq ?? ""}</td></tr>`).join("")}</tbody></table></div>` : ""}
       ${c.reviewed_by ? `<p class="muted small">Last reviewed by ${esc(c.reviewed_by)}${c.review_notes ? `: ${esc(c.review_notes)}` : ""}</p>` : ""}
       ${reviewer ? `<h3 style="margin-top:14px">Decision</h3><textarea id="reviewNotes" rows="2" placeholder="Notes (optional)">${esc(c.review_notes || "")}</textarea>
-        <div class="actions"><button class="btn ok" data-decide="approved" data-id="${c.id}">Approve</button><button class="btn bad" data-decide="rejected" data-id="${c.id}">Reject</button><button class="btn" data-decide="pending" data-id="${c.id}">Reset</button></div>` : '<p class="muted small">Your role can read but not review.</p>'}`;
+        <div class="actions"><button class="btn" data-editcase="${c.id}">Edit</button><button class="btn ok" data-decide="approved" data-id="${c.id}">Approve</button><button class="btn bad" data-decide="rejected" data-id="${c.id}">Reject</button><button class="btn" data-decide="pending" data-id="${c.id}">Reset</button></div>` : '<p class="muted small">Your role can read but not review.</p>'}`;
     d.classList.remove("hidden");
   }).catch((err) => toast(err.message, true));
 }
@@ -706,6 +718,193 @@ function closeModal() {
   $("#modal").classList.add("hidden");
 }
 
+// ------------------------------------------------------------------ case editor
+
+function renderDrawerEditor(c, d) {
+  d.innerHTML = `
+    <div style="display:flex;justify-content:space-between;gap:12px"><div class="muted">${esc(c.tc_code)} · editing</div><button class="btn small" data-canceledit>Cancel</button></div>
+    <p class="muted small">Corrections are kept. Approved and corrected cases are shown to the model as examples the next time you generate for this project.</p>
+    <label>Title<input id="eTitle" value="${esc(c.title)}" /></label>
+    <label>Priority<select id="ePriority">${["critical", "high", "medium", "low"].map((p) => `<option ${p === c.priority ? "selected" : ""}>${p}</option>`).join("")}</select></label>
+    <label>Preconditions (one per line)<textarea id="ePre" rows="2">${esc((c.preconditions || []).join("\n"))}</textarea></label>
+    <h3 style="margin-top:12px">Steps</h3>
+    <div id="eSteps">${c.steps.map(stepRow).join("")}</div>
+    <div class="actions"><button class="btn small" data-addstep>Add step</button></div>
+    <p id="editError" class="error"></p>
+    <div class="actions"><button class="btn primary" id="saveCase">Save correction</button></div>`;
+  d.classList.remove("hidden");
+}
+
+function stepRow(s = { action: "", expected: "" }) {
+  return `<div class="step-row"><input class="s-action" placeholder="Action" value="${esc(s.action)}" /><input class="s-expected" placeholder="Expected result" value="${esc(s.expected)}" /><button class="btn small bad" data-rmstep type="button" aria-label="Remove step">x</button></div>`;
+}
+
+function addEditorStep() {
+  $("#eSteps").insertAdjacentHTML("beforeend", stepRow());
+}
+
+async function saveCaseEdit() {
+  const c = state.drawerCase;
+  const steps = $$(".step-row").map((r) => ({ action: $(".s-action", r).value, expected: $(".s-expected", r).value }));
+  try {
+    await api(`/api/cycles/${state.cycleId}/test-cases/${c.id}`, {
+      method: "PUT",
+      body: { title: $("#eTitle").value, priority: $("#ePriority").value, preconditions: $("#ePre").value.split("\n"), steps },
+    });
+    toast("Correction saved.");
+    await refreshCycle();
+    openDrawer(c.id);
+  } catch (err) {
+    $("#editError").textContent = err.message;
+  }
+}
+
+// ------------------------------------------------------------------ requirement import
+
+function openImportModal() {
+  openModal(`
+    <h2>Import requirements from CSV</h2>
+    <p class="muted small">Columns: <code>title</code> (required), <code>type</code>, <code>description</code>, <code>acceptance_criteria</code> (separate several with <code>|</code>), <code>code</code> (optional).
+      <a href="#" id="dlTemplate">Download a template</a></p>
+    <label>Choose a CSV file<input id="impFile" type="file" accept=".csv,text/csv" /></label>
+    <label>or paste the rows<textarea id="impText" rows="6" placeholder="title,type,description,acceptance_criteria"></textarea></label>
+    <div id="impResult"></div>
+    <div class="modal-actions"><button class="btn" data-close>Close</button><button class="btn primary" id="runImport">Import</button></div>`);
+  $("#impFile").onchange = async (e) => { const f = e.target.files[0]; if (f) $("#impText").value = await f.text(); };
+  $("#dlTemplate").onclick = async (e) => {
+    e.preventDefault();
+    const res = await api(`/api/cycles/${state.cycleId}/requirements/template.csv`, { raw: true });
+    const url = URL.createObjectURL(await res.blob());
+    const a = Object.assign(document.createElement("a"), { href: url, download: "requirements-template.csv" });
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  $("#runImport").onclick = async () => {
+    const text = $("#impText").value.trim();
+    if (!text) return ($("#impResult").innerHTML = '<p class="error">Choose a file or paste some rows first.</p>');
+    try {
+      const r = await api(`/api/cycles/${state.cycleId}/requirements/import`, { method: "POST", body: { csv: text } });
+      $("#impResult").innerHTML = `<div class="notice ${r.created ? "ok" : "warn"}"><b>${r.created} requirement(s) imported.</b></div>${r.errors.length ? `<div class="notice warn"><b>${r.errors.length} row(s) skipped</b><ul style="margin:6px 0 0 18px;padding:0">${r.errors.map((x) => `<li>${x.line ? "Line " + x.line + ": " : ""}${esc(x.error)}</li>`).join("")}</ul></div>` : ""}`;
+      if (r.created) await refreshCycle();
+    } catch (err) {
+      $("#impResult").innerHTML = `<p class="error">${esc(err.message)}</p>`;
+    }
+  };
+}
+
+// ------------------------------------------------------------------ knowledge
+
+const KIND_INFO = {
+  glossary: ["Term", "What a word means in this product, e.g. 'Hold: a 24 hour reservation on a book'."],
+  rule: ["Rule", "A fact that is always true, e.g. 'Cards lock after 5 failed sign-ins and unlock after 30 minutes'."],
+  avoid: ["Avoid", "Something generated cases must never assume, e.g. 'There is no guest checkout'."],
+};
+
+async function renderKnowledge() {
+  const el = $("#tab-knowledge");
+  const editable = can("qa_lead");
+  try {
+    state.knowledge = await api(`/api/projects/${state.projectId}/knowledge`);
+  } catch (err) {
+    el.innerHTML = `<div class="card empty">${esc(err.message)}</div>`;
+    return;
+  }
+  const kind = state.kindDraft || "rule";
+  state.kindDraft = kind;
+  const group = (k) => state.knowledge.filter((i) => i.kind === k);
+  el.innerHTML = `
+    <div class="page-head"><div><h2>Project knowledge</h2>
+      <div class="muted">What the model must know about this product. It is added to every Claude or ChatGPT run for this project, so generated cases use your terms and respect your rules instead of guessing.</div></div></div>
+    <div class="gen-layout">
+      <div class="card">
+        <h3>Teach the generator</h3>
+        ${editable ? `
+        <div class="actions" style="margin:0 0 8px">${Object.entries(KIND_INFO).map(([k, [name]]) => `<button class="btn small ${k === kind ? "primary" : ""}" data-kind="${k}" type="button">${name}</button>`).join("")}</div>
+        <p class="muted small" id="kindHelp">${esc(KIND_INFO[kind][1])}</p>
+        <label>Short title<input id="kTitle" maxlength="200" /></label>
+        <label>Details<textarea id="kContent" rows="4" maxlength="2000"></textarea></label>
+        <p id="kError" class="error"></p>
+        <button class="btn primary" id="addKnowledge" style="width:100%">Add</button>` : '<p class="muted">QA lead role or higher is needed to add knowledge.</p>'}
+        <h3 style="margin-top:16px">It also learns from review</h3>
+        <p class="muted small">Cases you approve or correct are shown to the model as examples. Cases you reject with a note are shown as mistakes not to repeat. The built-in rules generator does not use any of this.</p>
+      </div>
+      <div>
+        ${state.knowledge.length ? Object.entries(KIND_INFO).map(([k, [name]]) => group(k).length ? `<div class="card" style="margin-bottom:12px"><h3>${name}s <span class="pill">${group(k).length}</span></h3>
+          ${group(k).map((i) => `<div class="k-item"><div><b>${esc(i.title)}</b><div class="small">${esc(i.content)}</div><div class="muted small">${esc(i.created_by)}</div></div>${editable ? `<button class="btn small bad" data-delknowledge="${i.id}">Delete</button>` : ""}</div>`).join("")}</div>` : "").join("") : '<div class="card empty">Nothing here yet. Add a term, a rule or something to avoid.</div>'}
+      </div>
+    </div>`;
+}
+
+async function addKnowledge() {
+  try {
+    await api(`/api/projects/${state.projectId}/knowledge`, { method: "POST", body: { kind: state.kindDraft, title: $("#kTitle").value, content: $("#kContent").value } });
+    toast("Added. It will be used the next time you generate.");
+    renderKnowledge();
+  } catch (err) {
+    $("#kError").textContent = err.message.includes("[") ? "Fill in both a title and the details." : err.message;
+  }
+}
+
+async function deleteKnowledge(id) {
+  try {
+    await api(`/api/projects/${state.projectId}/knowledge/${id}`, { method: "DELETE" });
+    renderKnowledge();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// ------------------------------------------------------------------ team (admin)
+
+const ROLES = ["viewer", "tester", "qa_lead", "admin"];
+const ds_isRole = (t) => t.dataset && t.dataset.roleuser !== undefined;
+
+async function renderTeam() {
+  const el = $("#tab-team");
+  let users;
+  try {
+    users = await api("/api/users");
+  } catch (err) {
+    el.innerHTML = `<div class="card empty">${esc(err.message)}</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="page-head"><div><h2>Team</h2><div class="muted">Viewers read, testers review, QA leads manage requirements and generate, admins manage people.</div></div></div>
+    <div class="gen-layout">
+      <div class="card"><h3>Add a person</h3>
+        <label>Name<input id="uName" /></label><label>Email<input id="uEmail" type="email" /></label>
+        <label>Role<select id="uRole">${ROLES.map((r) => `<option ${r === "tester" ? "selected" : ""}>${r}</option>`).join("")}</select></label>
+        <label>Temporary password (8+ characters)<input id="uPass" type="password" autocomplete="new-password" /></label>
+        <p id="uError" class="error"></p><button class="btn primary" id="addUser" style="width:100%">Add</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th></th></tr></thead><tbody>
+        ${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td>
+          <td><select data-roleuser="${u.id}">${ROLES.map((r) => `<option ${r === u.role ? "selected" : ""}>${r}</option>`).join("")}</select></td>
+          <td>${u.id === state.user.id ? '<span class="muted small">you</span>' : `<button class="btn small bad" data-deluser="${u.id}">Remove</button>`}</td></tr>`).join("")}
+      </tbody></table></div></div>`;
+}
+
+async function addUser() {
+  try {
+    await api("/api/users", { method: "POST", body: { name: $("#uName").value, email: $("#uEmail").value, role: $("#uRole").value, password: $("#uPass").value } });
+    toast("Person added.");
+    renderTeam();
+  } catch (err) {
+    $("#uError").textContent = err.message.includes("[") ? "Enter a name, an email and a password of 8 or more characters." : err.message;
+  }
+}
+
+async function changeRole(id, role) {
+  try { await api(`/api/users/${id}`, { method: "PATCH", body: { role } }); toast("Role updated."); }
+  catch (err) { toast(err.message, true); }
+  renderTeam();
+}
+
+async function deleteUser(id) {
+  if (!confirm("Remove this person? They will no longer be able to sign in.")) return;
+  try { await api(`/api/users/${id}`, { method: "DELETE" }); toast("Person removed."); renderTeam(); }
+  catch (err) { toast(err.message, true); }
+}
+
 // ------------------------------------------------------------------ events
 
 document.addEventListener("click", async (ev) => {
@@ -750,6 +949,17 @@ document.addEventListener("click", async (ev) => {
   if (ds.close !== undefined) return closeModal();
   if (ds.closeDrawer !== undefined) return $("#drawer").classList.add("hidden");
   if (t.id === "addReq") return openRequirementModal(null);
+  if (t.id === "importReq") return openImportModal();
+  if (ds.editcase) return openDrawer(Number(ds.editcase), true);
+  if (ds.canceledit !== undefined) return openDrawer(state.drawerCase.id);
+  if (ds.addstep !== undefined) return addEditorStep();
+  if (ds.rmstep !== undefined) { t.closest(".step-row").remove(); return; }
+  if (t.id === "saveCase") return saveCaseEdit();
+  if (t.id === "addKnowledge") return addKnowledge();
+  if (ds.delknowledge) return deleteKnowledge(Number(ds.delknowledge));
+  if (ds.kind) { state.kindDraft = ds.kind; $$("[data-kind]").forEach((b) => b.classList.toggle("primary", b === t)); $("#kindHelp").textContent = KIND_INFO[ds.kind][1]; return; }
+  if (t.id === "addUser") return addUser();
+  if (ds.deluser) return deleteUser(Number(ds.deluser));
   if (ds.edit) return openRequirementModal(state.reqs.find((r) => r.id === Number(ds.edit)));
   if (ds.del) {
     const req = state.reqs.find((r) => r.id === Number(ds.del));
@@ -791,6 +1001,8 @@ document.addEventListener("change", (ev) => {
     $("#gModel").value = "";
     syncGeneratorBox();
   }
+  else if (t.id === "gStrict") state.llm.strict = t.checked;
+  else if (ds_isRole(t)) changeRole(Number(t.dataset.roleuser), t.value);
   else if (t.id === "fType") { state.filters.type = t.value; renderReview(); }
   else if (t.id === "fStatus") { state.filters.status = t.value; renderReview(); }
   else if (t.id === "fStale") { state.filters.stale = t.checked; renderReview(); }

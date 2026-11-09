@@ -79,13 +79,69 @@ What you should know before using a key:
 - **It calls the provider from the server on your machine**, so your key does not pass through anyone else's service.
 - **Requirement text is sent to the provider** (titles, descriptions, acceptance criteria). Use the demo data or
   non-sensitive requirements. Usage is billed to your own provider account.
-- **Model output is checked before it is saved.** Cases that reference unknown requirement codes, have no steps, or
-  have no title are dropped, and unknown priorities become "medium".
+- **Model output is checked before it is saved.** See [Keeping the model honest](#keeping-the-model-honest) below.
 - **If a call fails** (bad key, quota, timeout), that agent falls back to the built-in rules, says so in the live view
   ("Written by rules (fallback)"), and the run still finishes.
 - Model names are editable because accounts differ. Defaults are `claude-sonnet-5` and `gpt-4o`.
 - Prefer a server-wide setting? Set `LLM_PROVIDER` (`anthropic` or `openai`), `LLM_API_KEY` and optionally
   `LLM_MODEL` in `.env`. The UI then needs no key.
+
+## Keeping the model honest
+
+A language model writes fluent test cases, including ones about things your requirements never said. TRACE treats
+that as the main risk and works on it in four places.
+
+**1. Every case must quote its source.** The model has to return `evidence`, an exact sentence from the
+requirement or acceptance criteria that the case verifies. TRACE checks the quote really appears in the
+requirement (or in project knowledge). No quote, or a quote that is not there, and the case is dropped before it
+reaches the review queue. The reviewer sees the quote next to every case that survives.
+
+**2. Invented details are flagged.** Endpoints (`/api/v2/loans`) and code-style field names (`member_id`) that
+appear in a case but nowhere in the requirement, the project description or the project knowledge get a warning
+badge. Tick **Strict grounding** on the Generate tab to drop those cases too. Near-duplicate cases are collapsed.
+
+**3. The model can ask instead of guessing.** If a requirement is ambiguous or missing a limit, a message or a
+rule, the model returns a clarification question. Questions are listed after the run so you can fix the
+requirement text or add a project rule, then generate again.
+
+**4. The project teaches the model.**
+
+- The **Knowledge** tab holds terms, rules and "avoid" notes for a project. They go into every Claude or ChatGPT
+  run as authoritative context.
+- **Review feeds back.** Cases a person corrected (Edit in the review drawer) and then approved are shown to the
+  model as examples to imitate. Cases rejected with a note are shown as mistakes not to repeat. Nothing is
+  fine-tuned: it is context, so it takes effect on the next run and can be undone by deleting a note or a case.
+
+The built-in rules generator is deterministic and does not use knowledge or feedback.
+
+### Measuring it
+
+`eval/golden.json` is a small set of requirements with the phrases a good answer must cover and phrases that would
+be inventions. Score any generator against it:
+
+```bash
+python scripts/run_eval.py                          # built-in rules, offline
+LLM_API_KEY=... python scripts/run_eval.py --provider anthropic
+LLM_API_KEY=... python scripts/run_eval.py --provider openai --strict
+```
+
+It prints criteria coverage, must-cover hits, invented phrases and how many cases grounding dropped, and exits
+non-zero if a threshold in the file is missed. Run it before and after changing a prompt or model, and add your
+own requirements to the golden file as you find cases the model gets wrong. CI runs the offline version.
+
+## Running it for a team
+
+```bash
+cp .env.example .env     # set SECRET_KEY, ADMIN_EMAIL, ADMIN_PASSWORD and SEED_DEMO=0
+docker compose up --build -d
+```
+
+With `SEED_DEMO=0` there are no demo accounts, the app refuses to start on the placeholder `SECRET_KEY`, and the
+first admin is created from `ADMIN_EMAIL` / `ADMIN_PASSWORD`. That admin adds everyone else in the **Team** tab (or
+use `python -m app.cli create-user you@example.com "Your Name" qa_lead`). Data lives in the `trace-data` volume.
+
+Bring requirements in with **Import CSV** on the Requirements tab
+([template](docs/requirements-template.csv)). Rows that fail are listed by line and the rest still import.
 
 ## How it works
 
@@ -188,6 +244,10 @@ Interactive docs at http://127.0.0.1:8000/docs.
 | `PATCH /api/cycles/{id}/test-cases[/{tc}]` | approve, reject, reset (single or bulk) | tester |
 | `GET /api/cycles/{id}/traceability` | requirement coverage matrix | read |
 | `GET /api/cycles/{id}/export/csv` | CSV with one row per case and per step | qa_lead |
+| `PUT /api/cycles/{id}/test-cases/{tc}` | correct a case (title, priority, preconditions, steps) | tester |
+| `POST /api/cycles/{id}/requirements/import` | create requirements from CSV text | qa_lead |
+| `GET/POST/DELETE /api/projects/{id}/knowledge` | project terms, rules and avoid notes | read: any, write: qa_lead |
+| `GET/POST/PATCH/DELETE /api/users` | manage people and roles | admin |
 | `GET /api/roadmap` | what is built and what is next | public |
 
 Stream events: `pipeline_start`, `agent_start`, `tc_created`, `agent_warning`, `agent_complete`, `generation_complete`, `generation_error`.
@@ -203,6 +263,7 @@ Everything is optional. Copy `.env.example` to `.env` to change a default.
 | `SEED_DEMO` | `1` | create demo accounts and the sample project on first start |
 | `GENERATION_DELAY_MS` | `120` | pause between streamed cases so the live view is visible |
 | `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL` | `rules` / empty / empty | optional server-wide generator defaults |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | empty | first admin, created on start when `SEED_DEMO=0` and there are no users |
 
 ## Project layout
 
@@ -213,24 +274,32 @@ app/
   db.py  models.py     database setup and tables
   security.py          tokens, password hashing, role checks
   events.py            in-process event bus with replay
-  routers/             auth, projects, requirements, generate, testcases, llm
+  routers/             auth, projects, requirements, generate, testcases, llm, knowledge, users
   services/
     agents.py          the five rule-based agents
     llm.py             Claude and ChatGPT generators, key handling, validation
     generation.py      orchestrator: parallel run, persistence, gaps
+    grounding.py       evidence, invented-term and duplicate checks on model output
+    evaluation.py      golden-set scoring
+    importer.py        CSV requirement import
     reporting.py       serialisation, traceability matrix, CSV export
   seed.py              demo users and sample project
   roadmap.json         single source for the Roadmap tab and ROADMAP.md
   static/              the web UI
-tests/                 pytest: agents, API, roles, streaming, regeneration, providers
-scripts/build_roadmap_md.py
+  cli.py               create-user / list-users
+tests/                 pytest: agents, API, roles, streaming, regeneration, providers, grounding
+eval/golden.json       requirements and expectations for scripts/run_eval.py
+scripts/               build_roadmap_md.py, run_eval.py
+Dockerfile  docker-compose.yml  .github/workflows/ci.yml
 ```
 
 ## Known limits
 
 - One server process: the event bus is in memory. Running several workers needs Redis pub/sub (on the roadmap).
-- SQLite with `create_all` and no migrations. After pulling a schema change run `python -m app.seed --reset`.
-- The sign-in page lists the demo accounts. For anything shared, remove `GET /api/auth/demo-users` and set a real `SECRET_KEY`.
+- SQLite with `create_all` and no migration tool. Columns added in later versions are added automatically on start;
+  anything bigger needs `python -m app.seed --reset` or Alembic (on the roadmap).
+- Grounding is a text check, not understanding. It catches quotes that are not in the requirement and invented
+  endpoints or field names. It cannot tell that a well-quoted case has a wrong expected result, so review still matters.
 - The rule engine writes sensible, structured cases from acceptance criteria. A model can reason about your domain
   in ways rules cannot, but it can also be wrong, which is exactly why the review gate exists.
 - The Claude and ChatGPT calls are covered by tests against a mocked HTTP layer. I have not run them against live accounts.

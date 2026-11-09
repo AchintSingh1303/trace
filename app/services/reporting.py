@@ -66,6 +66,10 @@ def tc_to_dict(tc: TestCase, reqs: dict[int, Requirement], detail: bool = True) 
         "reviewed_at": tc.reviewed_at.isoformat() if tc.reviewed_at else None,
         "review_notes": tc.review_notes,
         "step_count": len(tc.steps),
+        "evidence": tc.evidence or "",
+        "warnings": tc.warnings or [],
+        "source": tc.source or "rules",
+        "edited": bool(tc.edited),
     }
     if detail:
         data["preconditions"] = tc.preconditions or []

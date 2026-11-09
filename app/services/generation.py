@@ -17,7 +17,7 @@ import asyncio
 import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, select
@@ -29,6 +29,7 @@ from ..models import (
     AuditLog,
     Cycle,
     GenerationRun,
+    KnowledgeItem,
     Project,
     Requirement,
     TCStep,
@@ -38,7 +39,8 @@ from ..models import (
     utcnow,
 )
 from . import agents as A
-from .llm import LLMConfig, LLMError, generate_with_llm
+from .grounding import check_cases
+from .llm import Guidance, LLMConfig, LLMError, generate_with_llm
 
 _tasks: set[asyncio.Task] = set()
 
@@ -55,6 +57,12 @@ class Context:
     stale_ids: set[int]
     # pairs that must be rebuilt because a requirement they also cover has changed
     forced: set[tuple[int, str]]
+    # per test type: what the project knows, what reviewers approved, what they rejected
+    guidance: dict[str, Guidance] = field(default_factory=dict)
+    strict: bool = False
+    clarifications: list[dict] = field(default_factory=list)
+    dropped: list[dict] = field(default_factory=list)
+    warned: int = 0
 
     def is_target(self, req_id: int, agent: str) -> bool:
         if not self.incremental:
@@ -63,9 +71,16 @@ class Context:
 
 
 def start_generation(
-    cycle_id: int, run_id: int, selected: list[str], mode: str, max_tcs: int | None, actor: str, llm: LLMConfig | None = None
+    cycle_id: int,
+    run_id: int,
+    selected: list[str],
+    mode: str,
+    max_tcs: int | None,
+    actor: str,
+    llm: LLMConfig | None = None,
+    strict: bool = False,
 ) -> None:
-    task = asyncio.create_task(run_generation(cycle_id, run_id, selected, mode, max_tcs, actor, llm))
+    task = asyncio.create_task(run_generation(cycle_id, run_id, selected, mode, max_tcs, actor, llm, strict))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
@@ -73,7 +88,56 @@ def start_generation(
 # --------------------------------------------------------------------------- loading
 
 
-def load_context(cycle_id: int, mode: str) -> Context:
+MAX_EXAMPLES = 3
+MAX_AVOID = 5
+
+
+def _case_example(db, tc: TestCase) -> dict:
+    steps = db.scalars(select(TCStep).where(TCStep.tc_id == tc.id).order_by(TCStep.seq)).all()
+    return {
+        "title": tc.title,
+        "priority": tc.priority,
+        "steps": [{"action": st.action, "expected": st.expected} for st in steps],
+        "evidence": tc.evidence,
+    }
+
+
+def load_guidance(db, project_id: int) -> dict[str, Guidance]:
+    """Project knowledge plus feedback from review: corrected and approved cases teach, rejected ones warn."""
+    knowledge = [
+        {"kind": k.kind, "title": k.title, "content": k.content}
+        for k in db.scalars(select(KnowledgeItem).where(KnowledgeItem.project_id == project_id).order_by(KnowledgeItem.id))
+    ]
+    cycle_ids = [c for (c,) in db.execute(select(Cycle.id).where(Cycle.project_id == project_id))]
+    out: dict[str, Guidance] = {}
+    for agent in A.TEST_TYPES:
+        approved = db.scalars(
+            select(TestCase)
+            .where(TestCase.cycle_id.in_(cycle_ids), TestCase.test_type == agent, TestCase.status == "approved")
+            .order_by(TestCase.edited.desc(), TestCase.id.desc())
+            .limit(MAX_EXAMPLES)
+        ).all()
+        rejected = db.scalars(
+            select(TestCase)
+            .where(
+                TestCase.cycle_id.in_(cycle_ids),
+                TestCase.test_type == agent,
+                TestCase.status == "rejected",
+                TestCase.review_notes.is_not(None),
+                TestCase.review_notes != "",
+            )
+            .order_by(TestCase.id.desc())
+            .limit(MAX_AVOID)
+        ).all()
+        out[agent] = Guidance(
+            knowledge=knowledge,
+            examples=[_case_example(db, tc) for tc in approved],
+            avoid=[{"title": tc.title, "reason": tc.review_notes} for tc in rejected],
+        )
+    return out
+
+
+def load_context(cycle_id: int, mode: str, strict: bool = False) -> Context:
     with SessionLocal() as db:
         cycle = db.get(Cycle, cycle_id)
         project = db.get(Project, cycle.project_id)
@@ -113,6 +177,8 @@ def load_context(cycle_id: int, mode: str) -> Context:
             owned=owned,
             stale_ids=stale_ids,
             forced=forced,
+            guidance=load_guidance(db, project.id),
+            strict=strict,
         )
 
 
@@ -124,11 +190,31 @@ async def _run_agent(
 ) -> tuple[str, list[A.Case]]:
     bus.publish(cycle_id, "agent_start", {"test_type": agent, "requirements": len(targets)})
     generator = llm.label if llm else "rules"
+    dropped_here = 0
     if not targets:
         cases: list[A.Case] = []
     elif llm:
         try:
-            cases = await asyncio.to_thread(generate_with_llm, agent, targets, ctx.project, llm)
+            guidance = ctx.guidance.get(agent)
+            result = await asyncio.to_thread(generate_with_llm, agent, targets, ctx.project, llm, guidance)
+            cases, report = check_cases(
+                result.cases,
+                targets,
+                knowledge_text=guidance.knowledge_text() if guidance else "",
+                project_text=f"{ctx.project.name} {ctx.project.description}",
+                strict=ctx.strict,
+            )
+            ctx.clarifications.extend({"test_type": agent, **c} for c in result.clarifications)
+            ctx.dropped.extend({"test_type": agent, **d} for d in report.dropped)
+            ctx.warned += report.warned
+            dropped_here = report.dropped_count
+            if dropped_here:
+                parts = ", ".join(f"{n} {reason.replace('_', ' ')}" for reason, n in report.reasons().items())
+                bus.publish(
+                    cycle_id,
+                    "agent_warning",
+                    {"test_type": agent, "message": f"Dropped {dropped_here} {agent} case(s) that were not grounded in the requirements ({parts})."},
+                )
         except Exception as exc:  # one bad call must not sink the run: fall back and say so
             reason = str(exc) if isinstance(exc, LLMError) else f"unexpected {exc.__class__.__name__}"
             bus.publish(
@@ -138,6 +224,8 @@ async def _run_agent(
             )
             generator = "rules (fallback)"
             cases = A.run_agent(agent, targets, ctx.reqs)
+            for case in cases:
+                case.source = "rules-fallback"
     else:
         cases = A.run_agent(agent, targets, ctx.reqs)
     cases = A.sort_and_cap(cases, cap)
@@ -159,7 +247,7 @@ async def _run_agent(
     bus.publish(
         cycle_id,
         "agent_complete",
-        {"test_type": agent, "total": len(cases), "subtypes": A.subtype_summary(cases), "generator": generator},
+        {"test_type": agent, "total": len(cases), "subtypes": A.subtype_summary(cases), "generator": generator, "dropped": dropped_here},
     )
     return agent, cases
 
@@ -221,6 +309,9 @@ def persist(cycle_id: int, run_id: int, results: dict[str, list[A.Case]], select
                         status="pending",
                         preconditions=case.preconditions,
                         automation_status="not_started",
+                        evidence=case.evidence,
+                        warnings=case.warnings,
+                        source=case.source,
                     )
                     db.add(tc)
                     db.flush()
@@ -246,6 +337,9 @@ def persist(cycle_id: int, run_id: int, results: dict[str, list[A.Case]], select
                 "by_type": by_type,
                 "deleted": len(doomed_ids),
                 "replaced_approved": replaced_approved,
+                "dropped": len(ctx.dropped),
+                "warned": ctx.warned,
+                "clarifications": ctx.clarifications,
             }
             run = db.get(GenerationRun, run_id)
             run.summary = summary
@@ -304,11 +398,18 @@ def _finish_run(run_id: int, status: str, error: str | None = None) -> None:
 
 
 async def run_generation(
-    cycle_id: int, run_id: int, selected: list[str], mode: str, max_tcs: int | None, actor: str, llm: LLMConfig | None = None
+    cycle_id: int,
+    run_id: int,
+    selected: list[str],
+    mode: str,
+    max_tcs: int | None,
+    actor: str,
+    llm: LLMConfig | None = None,
+    strict: bool = False,
 ) -> None:
     started = time.time()
     try:
-        ctx = await asyncio.to_thread(load_context, cycle_id, mode)
+        ctx = await asyncio.to_thread(load_context, cycle_id, mode, strict)
         bus.publish(
             cycle_id,
             "pipeline_start",
@@ -322,6 +423,8 @@ async def run_generation(
                 "requirements": len(ctx.reqs),
                 "new_requirements": ctx.new_count,
                 "stale_requirements": ctx.stale_count,
+                "knowledge_items": len(next(iter(ctx.guidance.values())).knowledge) if ctx.guidance else 0,
+                "strict": strict,
             },
         )
         caps = A.split_cap(max_tcs, selected)

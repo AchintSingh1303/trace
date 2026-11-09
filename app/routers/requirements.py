@@ -1,14 +1,16 @@
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..events import bus
 from ..models import AuditLog, Cycle, Requirement, TestCase, Traceability, User
-from ..schemas import RequirementCreate, RequirementUpdate
+from ..schemas import ImportBody, RequirementCreate, RequirementUpdate
 from ..security import get_current_user, require_role
+from ..services.importer import TEMPLATE, parse_requirements
 from ..services.reporting import req_to_dict, requirement_stats
 
 router = APIRouter(prefix="/api/cycles/{cycle_id}/requirements", tags=["requirements"])
@@ -41,6 +43,33 @@ def list_requirements(cycle_id: int, db: Session = Depends(get_db), _: User = De
     stats = requirement_stats(db, cycle_id)
     reqs = db.scalars(select(Requirement).where(Requirement.cycle_id == cycle_id).order_by(Requirement.code)).all()
     return [req_to_dict(r, len(stats[r.id]["stale"]) if r.id in stats else 0, len(stats[r.id]["cases"]) if r.id in stats else 0) for r in reqs]
+
+
+@router.get("/template.csv")
+def import_template(_: User = Depends(get_current_user)):
+    return Response(TEMPLATE, media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="requirements-template.csv"'})
+
+
+@router.post("/import")
+def import_requirements(cycle_id: int, body: ImportBody, db: Session = Depends(get_db), user: User = Depends(require_role("qa_lead"))):
+    """Create requirements from CSV text. Rows that fail are reported by line and the rest are still imported."""
+    _cycle_or_404(db, cycle_id)
+    _guard_running(cycle_id)
+    rows, errors = parse_requirements(body.csv)
+    existing = {c for (c,) in db.execute(select(Requirement.code).where(Requirement.cycle_id == cycle_id))}
+    created = []
+    for row in rows:
+        code = row["code"] or _next_code(db, cycle_id)
+        if code in existing:
+            errors.append({"line": None, "error": f"{code} already exists in this cycle, skipped"})
+            continue
+        existing.add(code)
+        db.add(Requirement(cycle_id=cycle_id, code=code, title=row["title"], description=row["description"], req_type=row["req_type"], acceptance_criteria=row["acceptance_criteria"]))
+        db.flush()
+        created.append(code)
+    db.add(AuditLog(cycle_id=cycle_id, actor=user.email, action="requirement.import", entity="cycle", entity_id=str(cycle_id), details={"created": len(created), "errors": len(errors)}))
+    db.commit()
+    return {"created": len(created), "codes": created, "errors": errors}
 
 
 @router.post("", status_code=201)

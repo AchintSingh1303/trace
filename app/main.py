@@ -10,12 +10,12 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from . import __version__
-from .config import settings
+from .config import check_production_ready, settings
 from .db import SessionLocal, init_db
 from .models import GenerationRun, utcnow
-from .routers import auth, generate, llm, projects, requirements, testcases
+from .routers import auth, generate, knowledge, llm, projects, requirements, testcases, users
 from .security import get_current_user
-from .seed import seed
+from .seed import bootstrap_admin, seed
 from .services.agents import REQ_TYPES, TEST_TYPES
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -24,9 +24,12 @@ ROADMAP_FILE = Path(__file__).parent / "roadmap.json"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    check_production_ready()
     init_db()
     if settings.seed_demo:
         seed()
+    else:
+        bootstrap_admin()
     # a run still marked "running" belongs to a process that no longer exists
     with SessionLocal() as db:
         for run in db.scalars(select(GenerationRun).where(GenerationRun.status == "running")):
@@ -39,8 +42,14 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="TRACE", version=__version__, lifespan=lifespan)
 
-for module in (auth, projects, requirements, generate, testcases, llm):
+for module in (auth, projects, requirements, generate, testcases, llm, knowledge, users):
     app.include_router(module.router)
+
+
+@app.get("/api/config")
+def public_config():
+    """What the sign-in screen needs before anyone is logged in."""
+    return {"demo": settings.seed_demo, "version": __version__}
 
 
 @app.get("/api/meta")

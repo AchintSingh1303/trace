@@ -39,6 +39,8 @@ class Settings:
     llm_provider: str
     llm_api_key: str
     llm_model: str
+    admin_email: str
+    admin_password: str
 
 
 def load_settings() -> Settings:
@@ -53,7 +55,18 @@ def load_settings() -> Settings:
         llm_provider=os.getenv("LLM_PROVIDER", "rules").lower(),
         llm_api_key=os.getenv("LLM_API_KEY", ""),
         llm_model=os.getenv("LLM_MODEL", ""),
+        admin_email=os.getenv("ADMIN_EMAIL", "").strip().lower(),
+        admin_password=os.getenv("ADMIN_PASSWORD", ""),
     )
 
 
 settings = load_settings()
+
+
+DEFAULT_SECRET = "dev-only-secret-change-me"
+
+
+def check_production_ready() -> None:
+    """With demo data off the app is meant for real use, so refuse to start with the placeholder signing key."""
+    if not settings.seed_demo and settings.secret_key == DEFAULT_SECRET:
+        raise RuntimeError("Set SECRET_KEY to a long random value before running with SEED_DEMO=0 (see .env.example).")

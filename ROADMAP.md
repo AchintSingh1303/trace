@@ -39,6 +39,34 @@ Use the offline rule engine, or paste your own Claude (Anthropic) or ChatGPT (Op
 
 **Why:** Anyone can compare a model against deterministic rules on the same requirements, with nothing to install and no data leaving the machine unless they choose it.
 
+### Grounding checks on model output
+*Quality*
+
+Every model-written case must quote the requirement sentence it verifies. Cases with no quote, a quote that is not there, or invented endpoints and fields are dropped or flagged. The model can ask clarification questions instead of guessing.
+
+**Why:** A fluent test case about behaviour nobody specified is worse than no test case, because it looks reviewed.
+
+### Project knowledge and learning from review
+*Quality*
+
+Per-project terms, rules and avoid notes go into every model run. Corrected and approved cases become examples; rejected cases with a note become warnings.
+
+**Why:** The fastest way to fix a repeated mistake is to tell the generator once, in the project, not in every prompt.
+
+### Golden-set evaluation
+*Quality*
+
+scripts/run_eval.py scores any generator for criteria coverage, must-cover phrases and invented content, and fails when thresholds are missed. CI runs it.
+
+**Why:** Without a measurement, a prompt change is a guess.
+
+### Ready for a team: Docker, admin users, CSV import
+*Setup*
+
+Dockerfile and compose file, first admin from environment, a Team tab for users and roles, CSV requirement import with per-line errors, automatic column upgrades, and a startup check against the placeholder signing key.
+
+**Why:** A tool others cannot install, sign in to and load data into does not get used.
+
 ## Considering next
 
 ### Cross-cycle coverage baseline

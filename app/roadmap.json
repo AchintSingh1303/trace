@@ -42,6 +42,38 @@
       "why": "Anyone can compare a model against deterministic rules on the same requirements, with nothing to install and no data leaving the machine unless they choose it."
     },
     {
+      "id": "grounding",
+      "status": "shipped",
+      "area": "Quality",
+      "title": "Grounding checks on model output",
+      "summary": "Every model-written case must quote the requirement sentence it verifies. Cases with no quote, a quote that is not there, or invented endpoints and fields are dropped or flagged. The model can ask clarification questions instead of guessing.",
+      "why": "A fluent test case about behaviour nobody specified is worse than no test case, because it looks reviewed."
+    },
+    {
+      "id": "knowledge-feedback",
+      "status": "shipped",
+      "area": "Quality",
+      "title": "Project knowledge and learning from review",
+      "summary": "Per-project terms, rules and avoid notes go into every model run. Corrected and approved cases become examples; rejected cases with a note become warnings.",
+      "why": "The fastest way to fix a repeated mistake is to tell the generator once, in the project, not in every prompt."
+    },
+    {
+      "id": "eval-harness",
+      "status": "shipped",
+      "area": "Quality",
+      "title": "Golden-set evaluation",
+      "summary": "scripts/run_eval.py scores any generator for criteria coverage, must-cover phrases and invented content, and fails when thresholds are missed. CI runs it.",
+      "why": "Without a measurement, a prompt change is a guess."
+    },
+    {
+      "id": "team-ready",
+      "status": "shipped",
+      "area": "Setup",
+      "title": "Ready for a team: Docker, admin users, CSV import",
+      "summary": "Dockerfile and compose file, first admin from environment, a Team tab for users and roles, CSV requirement import with per-line errors, automatic column upgrades, and a startup check against the placeholder signing key.",
+      "why": "A tool others cannot install, sign in to and load data into does not get used."
+    },
+    {
       "id": "baseline-coverage",
       "status": "next",
       "area": "Generation",

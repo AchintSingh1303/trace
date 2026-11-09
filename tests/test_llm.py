@@ -17,7 +17,7 @@ def req(code="RQ-001"):
     return A.ReqView(1, code, "Login", "", "Functional", ["User can sign in"], 1)
 
 
-def tool_payload(code):
+def tool_payload(code, evidence="User can sign in"):
     return {
         "test_cases": [
             {
@@ -25,10 +25,16 @@ def tool_payload(code):
                 "subtype": "happy_path",
                 "priority": "high",
                 "req_codes": [code],
+                "evidence": evidence,
                 "steps": [{"action": "Do the thing", "expected": "It works"}],
             }
         ]
     }
+
+
+def quote(prompt):
+    """A model that quotes the first requirement title it was given."""
+    return re.search(r'"title": "([^"]+)"', prompt).group(1)
 
 
 def install_mock(monkeypatch, handler):
@@ -46,12 +52,12 @@ def smart_handler(seen):
             if "tools" not in body:
                 return httpx.Response(200, json={"content": [{"type": "text", "text": "OK"}]})
             code = re.search(r"RQ-\d+", text).group(0)
-            return httpx.Response(200, json={"stop_reason": "tool_use", "content": [{"type": "tool_use", "name": llm.TOOL_NAME, "input": tool_payload(code)}]})
+            return httpx.Response(200, json={"stop_reason": "tool_use", "content": [{"type": "tool_use", "name": llm.TOOL_NAME, "input": tool_payload(code, quote(text))}]})
         text = body["messages"][1]["content"]
         if "tools" not in body:
             return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
         code = re.search(r"RQ-\d+", text).group(0)
-        call = {"function": {"name": llm.TOOL_NAME, "arguments": json.dumps(tool_payload(code))}}
+        call = {"function": {"name": llm.TOOL_NAME, "arguments": json.dumps(tool_payload(code, quote(text)))}}
         return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [call]}}]})
 
     return handler
@@ -73,7 +79,7 @@ def test_claude_request_shape_and_parsing(monkeypatch):
     seen = []
     install_mock(monkeypatch, smart_handler(seen))
     cfg = llm.LLMConfig("anthropic", KEY, "model-x")
-    cases = llm.generate_with_llm("functional", [req()], A.ProjectView("P"), cfg)
+    cases = llm.generate_with_llm("functional", [req()], A.ProjectView("P"), cfg).cases
 
     url, headers, body = seen[0]
     assert url == llm.PROVIDERS["anthropic"]["url"]
@@ -86,7 +92,7 @@ def test_chatgpt_request_shape_and_parsing(monkeypatch):
     seen = []
     install_mock(monkeypatch, smart_handler(seen))
     cfg = llm.LLMConfig("openai", KEY, "model-y")
-    cases = llm.generate_with_llm("api", [req()], A.ProjectView("P"), cfg)
+    cases = llm.generate_with_llm("api", [req()], A.ProjectView("P"), cfg).cases
 
     url, headers, body = seen[0]
     assert url == llm.PROVIDERS["openai"]["url"]

@@ -260,3 +260,11 @@ label select { width: 100%; }
 .road-item p { margin: 4px 0; font-size: 13px; }
 .road-item .why { color: var(--muted); }
 .lessons li { margin: 6px 0; }
+
+/* grounding, editing, knowledge */
+.evidence { margin: 12px 0; padding: 10px 12px; border-left: 3px solid var(--info); background: var(--info-bg); border-radius: 6px; font-size: 14px; }
+.step-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 6px; margin-bottom: 6px; align-items: center; }
+.step-row input { margin: 0; }
+.k-item { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.k-item:first-of-type { border-top: 0; }
+.notice { margin-top: 10px; }
