@@ -114,6 +114,10 @@ requirement text or add a project rule, then generate again.
 
 The built-in rules generator is deterministic and does not use knowledge or feedback.
 
+![Project knowledge](docs/images/knowledge.png)
+
+![Correcting a case](docs/images/case-editor.png)
+
 ### Measuring it
 
 `eval/golden.json` is a small set of requirements with the phrases a good answer must cover and phrases that would
@@ -139,6 +143,8 @@ docker compose up --build -d
 With `SEED_DEMO=0` there are no demo accounts, the app refuses to start on the placeholder `SECRET_KEY`, and the
 first admin is created from `ADMIN_EMAIL` / `ADMIN_PASSWORD`. That admin adds everyone else in the **Team** tab (or
 use `python -m app.cli create-user you@example.com "Your Name" qa_lead`). Data lives in the `trace-data` volume.
+
+![Team](docs/images/team.png)
 
 Bring requirements in with **Import CSV** on the Requirements tab
 ([template](docs/requirements-template.csv)). Rows that fail are listed by line and the rest still import.
