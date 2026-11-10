@@ -27,6 +27,9 @@ const state = {
   // The API key lives here, in memory only. It is never put in localStorage or the URL.
   llm: { provider: null, model: "", key: "", strict: false },
   knowledge: [],
+  quality: {},
+  qualitySummary: null,
+  openRun: null,
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -56,7 +59,9 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
     let message = res.statusText;
     try {
       const data = await res.json();
-      message = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+      if (typeof data.detail === "string") message = data.detail;
+      else if (Array.isArray(data.detail)) message = data.detail.map((d) => String(d.msg || "").replace(/^Value error, /, "")).filter(Boolean).join(". ") || message;
+      else message = JSON.stringify(data.detail);
     } catch (_) {}
     throw new Error(message);
   }
@@ -167,11 +172,14 @@ async function selectCycle(cycleId) {
 
 async function refreshCycle() {
   if (!state.cycleId) return renderAll();
-  const [cycle, reqs, cases] = await Promise.all([
+  const [cycle, reqs, cases, quality] = await Promise.all([
     api(`/api/cycles/${state.cycleId}`),
     api(`/api/cycles/${state.cycleId}/requirements`),
     api(`/api/cycles/${state.cycleId}/test-cases`),
+    api(`/api/cycles/${state.cycleId}/quality`),
   ]);
+  state.quality = Object.fromEntries(quality.requirements.map((q) => [q.code, q]));
+  state.qualitySummary = quality.summary;
   state.summary = cycle.summary;
   state.reqs = reqs;
   state.cases = cases;
@@ -196,7 +204,7 @@ function renderTab(tab) {
     $(`#tab-${tab}`).innerHTML = `<div class="card empty">No project yet. Create one to get started.</div>`;
     return;
   }
-  ({ overview: renderOverview, requirements: renderRequirements, generate: renderGenerate, review: renderReview, knowledge: renderKnowledge, team: renderTeam, trace: renderTrace, roadmap: renderRoadmap }[tab])();
+  ({ overview: renderOverview, requirements: renderRequirements, generate: renderGenerate, review: renderReview, execution: renderExecution, knowledge: renderKnowledge, team: renderTeam, trace: renderTrace, roadmap: renderRoadmap }[tab])();
 }
 
 // ------------------------------------------------------------------ overview
@@ -222,6 +230,8 @@ async function renderOverview() {
       <div class="card kpi"><div class="value">${s.by_status.pending}</div><div class="label">Awaiting review</div></div>
       <div class="card kpi"><div class="value">${s.coverage_pct}%</div><div class="label">Requirements covered</div></div>
       <div class="card kpi"><div class="value">${s.stale_test_cases}</div><div class="label">Stale cases</div></div>
+      <div class="card kpi"><div class="value">${s.readiness.ready_pct}%</div><div class="label">Requirements passing</div></div>
+      <div class="card kpi"><div class="value">${s.readiness.failing}</div><div class="label">Requirements failing</div></div>
     </div>
     ${s.stale_test_cases ? `<div class="notice warn">${s.stale_test_cases} test case(s) were written against an older version of ${s.stale_requirements} requirement(s). Run an <b>incremental</b> generation to refresh only those.</div>` : ""}
     <div class="grid two">
@@ -255,9 +265,10 @@ function renderRequirements() {
   const editable = can("qa_lead");
   $("#tab-requirements").innerHTML = `
     <div class="page-head"><div><h2>Requirements</h2>
-      <div class="muted">Editing a requirement bumps its version and marks linked test cases stale.</div></div>
+      <div class="muted">Editing a requirement bumps its version and marks linked test cases stale.</div>
+      ${qualityLine()}</div>
       ${editable ? '<div class="actions" style="margin:0"><button class="btn" id="importReq">Import CSV</button><button class="btn primary" id="addReq">Add requirement</button></div>' : ""}</div>
-    <div class="table-wrap"><table><thead><tr><th>Code</th><th>Type</th><th>Requirement</th><th>Criteria</th><th>Version</th><th>Test cases</th>${editable ? "<th></th>" : ""}</tr></thead>
+    <div class="table-wrap"><table><thead><tr><th>Code</th><th>Type</th><th>Requirement</th><th>Criteria</th><th>Quality</th><th>Version</th><th>Test cases</th>${editable ? "<th></th>" : ""}</tr></thead>
     <tbody>${
       state.reqs.length
         ? state.reqs
@@ -267,14 +278,41 @@ function renderRequirements() {
         <td><span class="pill info">${esc(r.req_type)}</span></td>
         <td><div>${esc(r.title)}</div><div class="muted small">${esc(r.description)}</div></td>
         <td>${r.acceptance_criteria.length}</td>
+        <td>${qualityPill(r.code)}</td>
         <td>v${r.version}</td>
         <td>${r.test_case_count}${r.stale_test_cases ? ` <span class="pill warn">${r.stale_test_cases} stale</span>` : ""}</td>
         ${editable ? `<td class="nowrap"><button class="btn small" data-edit="${r.id}">Edit</button> <button class="btn small bad" data-del="${r.id}">Delete</button></td>` : ""}
       </tr>`
             )
             .join("")
-        : `<tr><td colspan="7" class="empty">No requirements yet.</td></tr>`
+        : `<tr><td colspan="8" class="empty">No requirements yet.</td></tr>`
     }</tbody></table></div>`;
+}
+
+const GRADE_CLASS = { A: "ok", B: "info", C: "warn", D: "bad" };
+
+function qualityPill(code) {
+  const q = state.quality[code];
+  if (!q) return "";
+  return `<button class="pill ${GRADE_CLASS[q.grade]}" data-quality="${esc(code)}" title="${q.findings.length} finding(s). Click to see them.">${q.grade} · ${q.score}</button>`;
+}
+
+function qualityLine() {
+  const q = state.qualitySummary;
+  if (!q || !q.count) return "";
+  return `<div class="muted small" style="margin-top:4px">Writing quality: average ${q.average_score}/100, ${q.with_errors} requirement(s) with errors. Advice only, it never blocks generation.</div>`;
+}
+
+function openQualityModal(code) {
+  const q = state.quality[code];
+  if (!q) return;
+  const sev = { error: "bad", warning: "warn", info: "info" };
+  openModal(`<h2>${esc(code)} · quality ${q.grade} (${q.score}/100)</h2>
+    <div class="muted small" style="margin-bottom:8px">${esc(q.title)}</div>
+    ${q.findings.length
+      ? q.findings.map((f) => `<div class="finding"><div><span class="pill ${sev[f.severity]}">${esc(f.severity)}</span> <b>${esc(f.message)}</b></div><div class="muted small">${esc(f.field)} · ${esc(f.suggestion)}</div></div>`).join("")
+      : '<div class="muted">Nothing to fix. This requirement reads as testable.</div>'}
+    <div class="modal-actions"><button class="btn" data-close>Close</button></div>`);
 }
 
 function openRequirementModal(req) {
@@ -568,7 +606,7 @@ function renderReview() {
   const allSelected = rows.length > 0 && rows.every((c) => state.selected.has(c.id));
   $("#tab-review").innerHTML = `
     <div class="page-head"><div><h2>Review</h2><div class="muted">${state.cases.length} test cases. Nothing moves on until a person approves it.</div></div>
-      ${can("qa_lead") ? '<div class="toolbar"><button class="btn" data-export="approved">Export approved (CSV)</button><button class="btn" data-export="">Export all</button></div>' : ""}</div>
+      ${can("qa_lead") ? '<div class="toolbar"><button class="btn" data-export="approved">Export approved (CSV)</button><button class="btn" data-export="">Export all</button><button class="btn" data-exportpy>pytest scaffold (API)</button></div>' : ""}</div>
     <div class="toolbar">
       <select id="fType"><option value="">All types</option>${Object.keys(TYPE_INFO).map((t) => `<option value="${t}" ${f.type === t ? "selected" : ""}>${cap(t)}</option>`).join("")}</select>
       <select id="fStatus"><option value="">All statuses</option>${["pending", "approved", "rejected"].map((t) => `<option value="${t}" ${f.status === t ? "selected" : ""}>${cap(t)}</option>`).join("")}</select>
@@ -652,6 +690,115 @@ async function exportCsv(status) {
   }
 }
 
+async function exportPytest() {
+  try {
+    const res = await api(`/api/cycles/${state.cycleId}/export/pytest`, { raw: true });
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `test_cycle_${state.cycleId}_api.py`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    const skipped = Number(res.headers.get("X-Trace-Skipped") || 0);
+    toast(skipped ? `Exported. ${skipped} case(s) had no endpoint and were left out.` : "Exported. Fill in the assertions before running it.");
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// ------------------------------------------------------------------ execution
+
+const RESULT_CLASS = { passing: "ok", failing: "bad", blocked: "warn", not_run: "", no_approved_cases: "info", passed: "ok", failed: "bad", skipped: "info" };
+const RESULT_LABEL = { passing: "passing", failing: "failing", blocked: "blocked", not_run: "not run", no_approved_cases: "no approved cases", passed: "passed", failed: "failed", skipped: "skipped" };
+
+function runStatePill(status) {
+  return `<span class="pill ${status === "open" ? "info" : "ok"}">${status}</span>`;
+}
+
+async function renderExecution() {
+  const el = $("#tab-execution");
+  const runs = await api(`/api/cycles/${state.cycleId}/runs`);
+  if (state.openRun && !runs.some((r) => r.id === state.openRun)) state.openRun = null;
+  if (state.openRun) return renderRunDetail();
+  el.innerHTML = `
+    <div class="page-head"><div><h2>Execution</h2><div class="muted">A run is a fixed list of the cases approved when it starts. Record what happened to each one.</div></div>
+      ${can("qa_lead") ? '<button class="btn primary" data-newrun>New run</button>' : ""}</div>
+    <div class="table-wrap"><table><thead><tr><th>Run</th><th>Status</th><th>Progress</th><th>Passed</th><th>Failed</th><th>Blocked</th><th>Pass rate</th><th>Started</th></tr></thead><tbody>${
+      runs.length
+        ? runs.map((r) => `<tr class="clickable" data-openrun="${r.id}"><td><b>${esc(r.name)}</b></td><td>${runStatePill(r.status)}</td>
+          <td>${r.executed}/${r.total} (${r.progress_pct}%)</td><td>${r.passed}</td><td>${r.failed}</td><td>${r.blocked}</td>
+          <td>${r.pass_rate === null ? '<span class="muted">none yet</span>' : r.pass_rate + "%"}</td><td class="muted small nowrap">${esc(new Date(r.created_at + "Z").toLocaleString())}</td></tr>`).join("")
+        : '<tr><td colspan="8" class="empty">No runs yet. Approve some cases in Review, then start a run.</td></tr>'
+    }</tbody></table></div>`;
+}
+
+async function renderRunDetail() {
+  const el = $("#tab-execution");
+  const run = await api(`/api/cycles/${state.cycleId}/runs/${state.openRun}`);
+  const open = run.status === "open";
+  const canRecord = open && can("tester");
+  const btn = (status, label, cls, tc) => `<button class="btn small ${cls}" data-setresult="${status}" data-tc="${tc}">${label}</button>`;
+  el.innerHTML = `
+    <div class="page-head"><div><h2>${esc(run.name)} ${runStatePill(run.status)}</h2>
+      <div class="muted">Started by ${esc(run.created_by)}. ${open ? "Results can change until the run is closed." : "Closed, so this is now a record."}</div></div>
+      <div class="toolbar"><button class="btn" data-backruns>All runs</button>${open && can("qa_lead") ? '<button class="btn" data-closerun>Close run</button>' : ""}</div></div>
+    <div class="grid kpis">
+      <div class="card kpi"><div class="value">${run.progress_pct}%</div><div class="label">Executed (${run.executed}/${run.total})</div></div>
+      <div class="card kpi"><div class="value">${run.pass_rate === null ? "-" : run.pass_rate + "%"}</div><div class="label">Pass rate</div></div>
+      <div class="card kpi"><div class="value">${run.passed}</div><div class="label">Passed</div></div>
+      <div class="card kpi"><div class="value">${run.failed}</div><div class="label">Failed</div></div>
+      <div class="card kpi"><div class="value">${run.blocked}</div><div class="label">Blocked</div></div>
+      <div class="card kpi"><div class="value">${run.skipped}</div><div class="label">Skipped</div></div>
+    </div>
+    ${run.results.some((r) => r.stale_in_run) ? '<div class="notice warn">A requirement behind some of these cases was edited after the run started. Those results are marked, since they may describe an older meaning.</div>' : ""}
+    <div class="table-wrap"><table><thead><tr><th>ID</th><th>Test case</th><th>Priority</th><th>Result</th>${canRecord ? "<th>Notes and defect</th><th>Record</th>" : "<th>Notes</th>"}</tr></thead><tbody>${run.results.map((r) => `<tr>
+      <td class="nowrap"><b>${esc(r.tc_code)}</b></td>
+      <td>${esc(r.title)}${r.stale_in_run ? ' <span class="pill warn">requirement changed</span>' : ""}<div class="muted small">${esc(r.requirements.join(", "))}</div></td>
+      <td><span class="pill ${r.priority === "critical" ? "bad" : r.priority === "high" ? "warn" : ""}">${esc(r.priority)}</span></td>
+      <td><span class="pill ${RESULT_CLASS[r.status]}">${RESULT_LABEL[r.status]}</span>${r.executed_by ? `<div class="muted small">${esc(r.executed_by)}</div>` : ""}</td>
+      ${canRecord
+        ? `<td><input id="note-${r.tc_id}" placeholder="Notes (required to fail)" value="${esc(r.notes)}" style="min-width:230px" /><input id="defect-${r.tc_id}" placeholder="Defect key or link" value="${esc(r.defect_ref)}" style="margin-top:4px;min-width:230px" /></td>
+           <td class="nowrap">${btn("passed", "Pass", "ok", r.tc_id)} ${btn("failed", "Fail", "bad", r.tc_id)} ${btn("blocked", "Block", "", r.tc_id)} ${btn("skipped", "Skip", "", r.tc_id)} ${btn("not_run", "Reset", "", r.tc_id)}</td>`
+        : `<td>${esc(r.notes)}${r.defect_ref ? `<div class="muted small">${esc(r.defect_ref)}</div>` : ""}</td>`}
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+async function refreshSummary() {
+  try { state.summary = (await api(`/api/cycles/${state.cycleId}`)).summary; } catch (_) {}
+}
+
+async function recordResult(tcId, status) {
+  const notes = $(`#note-${tcId}`)?.value || "";
+  const defect = $(`#defect-${tcId}`)?.value || "";
+  const y = window.scrollY;
+  try {
+    await api(`/api/cycles/${state.cycleId}/runs/${state.openRun}/results/${tcId}`, { method: "PUT", body: { status, notes, defect_ref: defect } });
+    await renderRunDetail();
+    window.scrollTo(0, y);
+    refreshSummary();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function openRunModal() {
+  openModal(`<h2>New run</h2><div class="muted small" style="margin-bottom:8px">Includes every case that is approved right now.</div>
+    <label>Name<input id="runName" placeholder="Release 1.4 regression" /></label><p id="modalError" class="error"></p>
+    <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="saveRun">Start run</button></div>`);
+  $("#saveRun").onclick = async () => {
+    try {
+      const run = await api(`/api/cycles/${state.cycleId}/runs`, { method: "POST", body: { name: $("#runName").value } });
+      closeModal();
+      state.openRun = run.id;
+      await refreshSummary();
+      renderExecution();
+      toast(`Run started with ${run.total} cases.`);
+    } catch (err) { $("#modalError").textContent = err.message; }
+  };
+}
+
 // ------------------------------------------------------------------ traceability
 
 async function renderTrace() {
@@ -668,7 +815,7 @@ async function renderTrace() {
       <div class="card kpi"><div class="value">${s.pending_review}</div><div class="label">Need review</div></div>
       <div class="card kpi"><div class="value">${s.uncovered}</div><div class="label">No cases</div></div>
     </div>
-    <div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Type</th><th>Version</th><th>Cases by type</th><th>Review progress</th><th>State</th></tr></thead><tbody>${m.rows
+    <div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Type</th><th>Version</th><th>Cases by type</th><th>Review progress</th><th>State</th><th>Last result</th></tr></thead><tbody>${m.rows
       .map((r) => {
         const t = r.total || 1;
         const [cls, label] = stateLabel[r.state];
@@ -677,7 +824,8 @@ async function renderTrace() {
           <td>${Object.entries(r.by_type).map(([k, v]) => `<span class="pill">${k} ${v}</span>`).join(" ") || '<span class="muted">none</span>'}</td>
           <td><div class="stack" title="${r.statuses.approved} approved, ${r.statuses.pending} pending, ${r.statuses.rejected} rejected"><span class="a" style="width:${(100 * r.statuses.approved) / t}%"></span><span class="p" style="width:${(100 * r.statuses.pending) / t}%"></span><span class="r" style="width:${(100 * r.statuses.rejected) / t}%"></span></div>
             <div class="muted small">${r.statuses.approved}/${r.total} approved${r.stale ? ` · <span class="pill warn">${r.stale} stale</span>` : ""}</div></td>
-          <td><span class="pill ${cls}">${label}</span></td></tr>`;
+          <td><span class="pill ${cls}">${label}</span></td>
+          <td><span class="pill ${RESULT_CLASS[r.result]}">${RESULT_LABEL[r.result]}</span></td></tr>`;
       })
       .join("")}</tbody></table></div>
     <p class="muted small">Click a row to see its test cases in Review.</p>`;
@@ -908,7 +1056,7 @@ async function deleteUser(id) {
 // ------------------------------------------------------------------ events
 
 document.addEventListener("click", async (ev) => {
-  const t = ev.target.closest("button, a, tr[data-open], tr[data-reqfilter], .radio-card, [data-goto]");
+  const t = ev.target.closest("button, a, tr[data-open], tr[data-reqfilter], tr[data-openrun], .radio-card, [data-goto]");
   if (!t) return;
   const ds = t.dataset;
 
@@ -948,6 +1096,18 @@ document.addEventListener("click", async (ev) => {
   }
   if (ds.close !== undefined) return closeModal();
   if (ds.closeDrawer !== undefined) return $("#drawer").classList.add("hidden");
+  if (ds.quality) return openQualityModal(ds.quality);
+  if (ds.exportpy !== undefined) return exportPytest();
+  if (ds.newrun !== undefined) return openRunModal();
+  if (ds.openrun) { state.openRun = Number(ds.openrun); return renderExecution(); }
+  if (ds.backruns !== undefined) { state.openRun = null; return renderExecution(); }
+  if (ds.setresult) return recordResult(Number(ds.tc), ds.setresult);
+  if (ds.closerun !== undefined) {
+    if (!confirm("Close this run? Results can no longer be changed.")) return;
+    try { await api(`/api/cycles/${state.cycleId}/runs/${state.openRun}/close`, { method: "POST" }); toast("Run closed."); renderRunDetail(); }
+    catch (err) { toast(err.message, true); }
+    return;
+  }
   if (t.id === "addReq") return openRequirementModal(null);
   if (t.id === "importReq") return openImportModal();
   if (ds.editcase) return openDrawer(Number(ds.editcase), true);

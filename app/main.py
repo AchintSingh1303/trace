@@ -13,7 +13,7 @@ from . import __version__
 from .config import check_production_ready, settings
 from .db import SessionLocal, init_db
 from .models import GenerationRun, utcnow
-from .routers import auth, generate, knowledge, llm, projects, requirements, testcases, users
+from .routers import auth, automation, generate, knowledge, llm, projects, quality, requirements, runs, testcases, users
 from .security import get_current_user
 from .seed import bootstrap_admin, seed
 from .services.agents import REQ_TYPES, TEST_TYPES
@@ -42,7 +42,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="TRACE", version=__version__, lifespan=lifespan)
 
-for module in (auth, projects, requirements, generate, testcases, llm, knowledge, users):
+for module in (auth, projects, requirements, generate, testcases, llm, knowledge, users, quality, runs, automation):
     app.include_router(module.router)
 
 

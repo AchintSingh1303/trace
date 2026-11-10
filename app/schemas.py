@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .services.agents import REQ_TYPES, TEST_TYPES
 
@@ -143,3 +143,22 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     role: Literal["viewer", "tester", "qa_lead", "admin"] | None = None
     password: str | None = Field(default=None, min_length=8, max_length=200, repr=False)
+
+
+RESULT_STATUSES = ("not_run", "passed", "failed", "blocked", "skipped")
+
+
+class RunCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class ResultUpdate(BaseModel):
+    status: Literal["not_run", "passed", "failed", "blocked", "skipped"]
+    notes: str = Field(default="", max_length=4000)
+    defect_ref: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def _failed_needs_notes(self):
+        if self.status == "failed" and not self.notes.strip():
+            raise ValueError("A failed result needs notes saying what happened")
+        return self

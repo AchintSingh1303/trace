@@ -133,6 +133,33 @@ It prints criteria coverage, must-cover hits, invented phrases and how many case
 non-zero if a threshold in the file is missed. Run it before and after changing a prompt or model, and add your
 own requirements to the golden file as you find cases the model gets wrong. CI runs the offline version.
 
+## Before and after generation
+
+Generation sits in the middle. Two new steps cover the ends. The design is in
+[docs/ARCHITECTURE-v0.3.md](docs/ARCHITECTURE-v0.3.md).
+
+**Check the requirement first.** Every requirement gets a score from 0 to 100 and a grade, shown on the
+Requirements tab. Click the grade to see what to fix: no acceptance criteria, words that cannot be tested ("fast",
+"easy", "as needed"), a performance requirement with no number, an API requirement with no method and path,
+criteria that are too short or join several checks, leftover TBDs, and near-duplicate requirements. It is plain
+rules with no model call, so it is instant and the same every time. It is advice only and never blocks a run.
+
+**Record what happened.** The Execution tab turns approved cases into a test run. A run is a fixed list taken when
+you start it, so it stays a clear question that gets answered. Testers mark each case passed, failed, blocked or
+skipped, with notes and a defect key or link (a failure needs notes). A QA lead closes the run, after which it is
+read-only. The report shows progress, pass rate and the failures worth chasing first. TRACE does not execute the
+tests: results are entered by people.
+
+**Know where each requirement stands.** Traceability gains a "last result" column and the Overview shows how many
+requirements are passing or failing, using the latest run that contains each case. A requirement is passing only
+when every approved case behind it passed.
+
+**Start the automation.** On the Review tab, **pytest scaffold (API)** downloads one test per approved API case with
+the request already written and the requirement it covers as a marker. The steps and expected results come across as
+comments. The assertions are left for you, because TRACE has not seen your service respond.
+
+![Execution](docs/images/execution.png)
+
 ## Running it for a team
 
 ```bash
@@ -250,6 +277,13 @@ Interactive docs at http://127.0.0.1:8000/docs.
 | `PATCH /api/cycles/{id}/test-cases[/{tc}]` | approve, reject, reset (single or bulk) | tester |
 | `GET /api/cycles/{id}/traceability` | requirement coverage matrix | read |
 | `GET /api/cycles/{id}/export/csv` | CSV with one row per case and per step | qa_lead |
+| `GET /api/cycles/{id}/export/pytest` | pytest skeleton for approved API cases | qa_lead |
+| `GET /api/cycles/{id}/quality` | score and findings for every requirement | read |
+| `GET/POST /api/cycles/{id}/runs` | list runs, start one from the approved cases | read, qa_lead |
+| `GET /api/cycles/{id}/runs/{run}` | run report: counts, pass rate, failures | read |
+| `PUT /api/cycles/{id}/runs/{run}/results/{tc}` | record a result | tester |
+| `POST /api/cycles/{id}/runs/{run}/close` | make a run read-only | qa_lead |
+| `GET /api/cycles/{id}/readiness` | per-requirement result from the latest runs | read |
 | `PUT /api/cycles/{id}/test-cases/{tc}` | correct a case (title, priority, preconditions, steps) | tester |
 | `POST /api/cycles/{id}/requirements/import` | create requirements from CSV text | qa_lead |
 | `GET/POST/DELETE /api/projects/{id}/knowledge` | project terms, rules and avoid notes | read: any, write: qa_lead |
@@ -280,7 +314,7 @@ app/
   db.py  models.py     database setup and tables
   security.py          tokens, password hashing, role checks
   events.py            in-process event bus with replay
-  routers/             auth, projects, requirements, generate, testcases, llm, knowledge, users
+  routers/             auth, projects, requirements, generate, testcases, llm, knowledge, users, quality, runs, automation
   services/
     agents.py          the five rule-based agents
     llm.py             Claude and ChatGPT generators, key handling, validation
@@ -289,11 +323,14 @@ app/
     evaluation.py      golden-set scoring
     importer.py        CSV requirement import
     reporting.py       serialisation, traceability matrix, CSV export
+    quality.py         requirement quality rules and scoring
+    execution.py       test runs, results, readiness
+    scaffold.py        approved API cases to a pytest file
   seed.py              demo users and sample project
   roadmap.json         single source for the Roadmap tab and ROADMAP.md
   static/              the web UI
   cli.py               create-user / list-users
-tests/                 pytest: agents, API, roles, streaming, regeneration, providers, grounding
+tests/                 pytest: agents, API, roles, streaming, regeneration, providers, grounding, quality, runs, scaffold
 eval/golden.json       requirements and expectations for scripts/run_eval.py
 scripts/               build_roadmap_md.py, run_eval.py
 Dockerfile  docker-compose.yml  .github/workflows/ci.yml
@@ -301,6 +338,10 @@ Dockerfile  docker-compose.yml  .github/workflows/ci.yml
 
 ## Known limits
 
+- TRACE records test results but does not run tests. Results are entered by hand, and the pytest file is a scaffold
+  with the assertions left to write.
+- The quality check is a set of rules. It finds vague wording and missing pieces, not requirements that are
+  clear but wrong.
 - One server process: the event bus is in memory. Running several workers needs Redis pub/sub (on the roadmap).
 - SQLite with `create_all` and no migration tool. Columns added in later versions are added automatically on start;
   anything bigger needs `python -m app.seed --reset` or Alembic (on the roadmap).

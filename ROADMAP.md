@@ -67,6 +67,34 @@ Dockerfile and compose file, first admin from environment, a Team tab for users 
 
 **Why:** A tool others cannot install, sign in to and load data into does not get used.
 
+### Requirement quality check
+*Quality*
+
+Each requirement is scored and graded by plain rules: missing criteria, untestable wording, unmeasured performance targets, API requirements with no endpoint, leftover TBDs and near-duplicates. Advice only.
+
+**Why:** Bad requirements are the biggest cause of bad test cases, so the problem is caught before generation, for free and the same way every time.
+
+### Test runs and results
+*Execution*
+
+Start a run from the approved cases, record passed, failed, blocked or skipped with notes and a defect reference, close it to make it a record, and read progress, pass rate and the failures to chase first.
+
+**Why:** A list of cases becomes a test cycle only when someone can say what was run and what happened.
+
+### Result-aware traceability
+*Governance*
+
+Each requirement shows the latest result of its approved cases, and the overview counts requirements that are passing, failing, blocked or not run.
+
+**Why:** Coverage says a test exists. Readiness says whether the requirement actually works.
+
+### pytest scaffold for API cases
+*Automation*
+
+Approved API cases export as one pytest file with the request written, the covered requirement as a marker, and steps and expected results as comments. Assertions are left for a person.
+
+**Why:** Saves the typing and keeps the link from code back to requirement without claiming tests that have never seen the service.
+
 ## Considering next
 
 ### Cross-cycle coverage baseline
@@ -161,6 +189,13 @@ Exports for reports and the traceability matrix, next to the CSV that already wo
 When an executed script fails, classify the failure, inspect the live page and propose a patch that a person accepts, all inside a strict token, time and tool-call budget.
 
 **Why:** Worth building only for failures that cannot be prevented by verifying locators when the script is generated.
+
+### Architecture and design from requirements
+*Design · effort: large*
+
+A second pipeline that drafts components, data flows and risks from the same requirements, each item citing the requirement behind it, with its own review gate.
+
+**Why:** Planning and testing share the same inputs. It reuses grounding and project knowledge, but needs its own data model and review flow.
 
 ## Principles behind this list
 

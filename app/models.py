@@ -181,3 +181,37 @@ class AuditLog(Base):
     entity_id: Mapped[str] = mapped_column(String(50), default="")
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TestRun(Base):
+    """A pass over the approved cases of a cycle. The cases are fixed when the run is created."""
+
+    __tablename__ = "test_runs"
+    __test__ = False  # not a pytest test class
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("cycles.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open | closed
+    created_by: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    results: Mapped[list["TestResult"]] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True, order_by="TestResult.id"
+    )
+
+
+class TestResult(Base):
+    __tablename__ = "test_results"
+    __test__ = False  # not a pytest test class
+    __table_args__ = (UniqueConstraint("run_id", "tc_id", name="uq_result_case"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("test_runs.id", ondelete="CASCADE"), index=True)
+    tc_id: Mapped[int] = mapped_column(ForeignKey("test_cases.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="not_run")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    defect_ref: Mapped[str] = mapped_column(String(200), default="")
+    executed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -74,6 +74,38 @@
       "why": "A tool others cannot install, sign in to and load data into does not get used."
     },
     {
+      "id": "req-quality",
+      "status": "shipped",
+      "area": "Quality",
+      "title": "Requirement quality check",
+      "summary": "Each requirement is scored and graded by plain rules: missing criteria, untestable wording, unmeasured performance targets, API requirements with no endpoint, leftover TBDs and near-duplicates. Advice only.",
+      "why": "Bad requirements are the biggest cause of bad test cases, so the problem is caught before generation, for free and the same way every time."
+    },
+    {
+      "id": "execution-tracking",
+      "status": "shipped",
+      "area": "Execution",
+      "title": "Test runs and results",
+      "summary": "Start a run from the approved cases, record passed, failed, blocked or skipped with notes and a defect reference, close it to make it a record, and read progress, pass rate and the failures to chase first.",
+      "why": "A list of cases becomes a test cycle only when someone can say what was run and what happened."
+    },
+    {
+      "id": "readiness",
+      "status": "shipped",
+      "area": "Governance",
+      "title": "Result-aware traceability",
+      "summary": "Each requirement shows the latest result of its approved cases, and the overview counts requirements that are passing, failing, blocked or not run.",
+      "why": "Coverage says a test exists. Readiness says whether the requirement actually works."
+    },
+    {
+      "id": "pytest-scaffold",
+      "status": "shipped",
+      "area": "Automation",
+      "title": "pytest scaffold for API cases",
+      "summary": "Approved API cases export as one pytest file with the request written, the covered requirement as a marker, and steps and expected results as comments. Assertions are left for a person.",
+      "why": "Saves the typing and keeps the link from code back to requirement without claiming tests that have never seen the service."
+    },
+    {
       "id": "baseline-coverage",
       "status": "next",
       "area": "Generation",
@@ -188,6 +220,15 @@
       "title": "Self-healing for broken scripts",
       "summary": "When an executed script fails, classify the failure, inspect the live page and propose a patch that a person accepts, all inside a strict token, time and tool-call budget.",
       "why": "Worth building only for failures that cannot be prevented by verifying locators when the script is generated.",
+      "effort": "large"
+    },
+    {
+      "id": "design-pipeline",
+      "status": "later",
+      "area": "Design",
+      "title": "Architecture and design from requirements",
+      "summary": "A second pipeline that drafts components, data flows and risks from the same requirements, each item citing the requirement behind it, with its own review gate.",
+      "why": "Planning and testing share the same inputs. It reuses grounding and project knowledge, but needs its own data model and review flow.",
       "effort": "large"
     }
   ],

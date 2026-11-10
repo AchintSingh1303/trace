@@ -268,3 +268,5 @@ label select { width: 100%; }
 .k-item { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
 .k-item:first-of-type { border-top: 0; }
 .notice { margin-top: 10px; }
+.finding { padding: 10px 0; border-top: 1px solid var(--border); }
+.finding:first-of-type { border-top: 0; }

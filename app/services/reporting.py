@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..models import GenerationRun, Requirement, TestCase, Traceability
+from .execution import readiness
 
 PRIORITY_NUMBER = {"critical": 1, "high": 2, "medium": 3, "low": 4}
 
@@ -117,6 +118,7 @@ def traceability_matrix(db: Session, cycle_id: int) -> dict:
     for link in db.scalars(select(Traceability).where(Traceability.cycle_id == cycle_id)):
         per_req[link.requirement_id].append(link)
 
+    result_state = {r["code"]: r["state"] for r in readiness(db, cycle_id)["rows"]}
     rows = []
     covered = 0
     for req in reqs:
@@ -148,6 +150,7 @@ def traceability_matrix(db: Session, cycle_id: int) -> dict:
                 "by_type": dict(by_type),
                 "stale": stale,
                 "state": state,
+                "result": result_state.get(req.code, "no_approved_cases"),
                 "tc_codes": sorted(cases[l.tc_id].tc_code for l in links),
             }
         )
@@ -186,6 +189,7 @@ def cycle_summary(db: Session, cycle_id: int) -> dict:
         "stale_test_cases": len(stale_cases),
         "stale_requirements": sum(1 for s in stats.values() if s["stale"]),
         "coverage_pct": matrix["summary"]["coverage_pct"],
+        "readiness": readiness(db, cycle_id)["summary"],
         "uncovered_requirements": matrix["summary"]["uncovered"],
         "last_run": None
         if not last_run
