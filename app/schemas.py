@@ -162,3 +162,40 @@ class ResultUpdate(BaseModel):
         if self.status == "failed" and not self.notes.strip():
             raise ValueError("A failed result needs notes saying what happened")
         return self
+
+
+class DesignGenerate(BaseModel):
+    provider: Literal["rules", "anthropic", "openai"] | None = None
+    api_key: str | None = Field(default=None, max_length=400, repr=False)
+    model: str | None = Field(default=None, max_length=100)
+
+
+class DesignReview(BaseModel):
+    status: Literal["approved", "rejected", "pending"]
+    review_notes: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _rejection_needs_a_reason(self):
+        if self.status == "rejected" and not (self.review_notes or "").strip():
+            raise ValueError("Say why it was rejected, so the next draft can avoid it")
+        return self
+
+
+class DesignBulkReview(DesignReview):
+    ids: list[int] = Field(min_length=1)
+
+
+class DesignEdit(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    summary: str | None = Field(default=None, max_length=1000)
+    detail: dict | None = None
+
+    @field_validator("detail")
+    @classmethod
+    def _detail(cls, value):
+        if value is None:
+            return None
+        for key in ("likelihood", "impact"):
+            if key in value and value[key] not in ("low", "medium", "high"):
+                raise ValueError(f"{key} must be low, medium or high")
+        return value

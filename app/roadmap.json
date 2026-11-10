@@ -106,6 +106,14 @@
       "why": "Saves the typing and keeps the link from code back to requirement without claiming tests that have never seen the service."
     },
     {
+      "id": "design-pipeline",
+      "status": "shipped",
+      "area": "Design",
+      "title": "Architecture and design from requirements",
+      "summary": "A second pipeline drafts components, data flows and risks from the same requirements. Each item quotes the requirement behind it, goes through a review gate, goes stale when its requirement changes, and exports as a Markdown design document with a diagram.",
+      "why": "Planning and testing start from the same requirements, so they should be traceable to each other and reviewed the same way."
+    },
+    {
       "id": "baseline-coverage",
       "status": "next",
       "area": "Generation",
@@ -223,13 +231,13 @@
       "effort": "large"
     },
     {
-      "id": "design-pipeline",
+      "id": "design-diagram",
       "status": "later",
       "area": "Design",
-      "title": "Architecture and design from requirements",
-      "summary": "A second pipeline that drafts components, data flows and risks from the same requirements, each item citing the requirement behind it, with its own review gate.",
-      "why": "Planning and testing share the same inputs. It reuses grounding and project knowledge, but needs its own data model and review flow.",
-      "effort": "large"
+      "title": "Draw the design in the app",
+      "summary": "Render the approved components and flows as a diagram on the Design tab, instead of only exporting Mermaid text.",
+      "why": "A picture is quicker to review than a table, but it needs a layout that stays readable as the design grows.",
+      "effort": "medium"
     }
   ],
   "principles": [

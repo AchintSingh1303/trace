@@ -160,6 +160,25 @@ comments. The assertions are left for you, because TRACE has not seen your servi
 
 ![Execution](docs/images/execution.png)
 
+## Design from the same requirements
+
+The same requirements can also drive planning. The **Design** tab drafts three things, each tied to the requirements
+it came from: components (the parts the system needs), data flows (how those parts and outside services talk), and
+risks (what could stop a requirement being met, with severity worked out from likelihood and impact). The design is
+in [docs/ARCHITECTURE-v0.4-design.md](docs/ARCHITECTURE-v0.4-design.md).
+
+It follows the same rules as the test cases. Every item quotes the requirement sentence behind it, and an item whose
+quote is not really in the requirement is dropped. A person approves, rejects (with a reason) or edits each one.
+Drafting again keeps what was approved or corrected and replaces the rest, and rejection reasons are passed to the
+next draft. If a requirement changes afterwards, its design items show as stale. Requirements with no design are
+listed as gaps, and Traceability shows requirement, design and last test result on one row.
+
+The built-in rules read keywords and need no key. Claude or ChatGPT can draft instead, with the same key handling as
+test generation. **Export approved (Markdown)** writes a document with a component table, a Mermaid diagram, a risk
+register and a requirement-to-design table.
+
+![Design](docs/images/design.png)
+
 ## Running it for a team
 
 ```bash
@@ -279,6 +298,11 @@ Interactive docs at http://127.0.0.1:8000/docs.
 | `GET /api/cycles/{id}/export/csv` | CSV with one row per case and per step | qa_lead |
 | `GET /api/cycles/{id}/export/pytest` | pytest skeleton for approved API cases | qa_lead |
 | `GET /api/cycles/{id}/quality` | score and findings for every requirement | read |
+| `GET /api/cycles/{id}/design` | design elements, counts, coverage gaps | read |
+| `POST /api/cycles/{id}/design/generate` | draft components, flows and risks, keeping approved ones | qa_lead |
+| `PATCH /api/cycles/{id}/design[/{element}]` | approve, reject (needs a reason) or reset | tester |
+| `PUT /api/cycles/{id}/design/{element}` | correct an element | tester |
+| `GET /api/cycles/{id}/design/export/md` | approved design as Markdown with a diagram | qa_lead |
 | `GET/POST /api/cycles/{id}/runs` | list runs, start one from the approved cases | read, qa_lead |
 | `GET /api/cycles/{id}/runs/{run}` | run report: counts, pass rate, failures | read |
 | `PUT /api/cycles/{id}/runs/{run}/results/{tc}` | record a result | tester |
@@ -314,7 +338,7 @@ app/
   db.py  models.py     database setup and tables
   security.py          tokens, password hashing, role checks
   events.py            in-process event bus with replay
-  routers/             auth, projects, requirements, generate, testcases, llm, knowledge, users, quality, runs, automation
+  routers/             auth, projects, requirements, generate, testcases, llm, knowledge, users, quality, runs, automation, design
   services/
     agents.py          the five rule-based agents
     llm.py             Claude and ChatGPT generators, key handling, validation
@@ -326,11 +350,14 @@ app/
     quality.py         requirement quality rules and scoring
     execution.py       test runs, results, readiness
     scaffold.py        approved API cases to a pytest file
+    design.py          design drafting, review, coverage, Markdown export
+    design_rules.py    built-in design rules and the grounding check
+    design_llm.py      Claude and ChatGPT design drafting
   seed.py              demo users and sample project
   roadmap.json         single source for the Roadmap tab and ROADMAP.md
   static/              the web UI
   cli.py               create-user / list-users
-tests/                 pytest: agents, API, roles, streaming, regeneration, providers, grounding, quality, runs, scaffold
+tests/                 pytest: agents, API, roles, streaming, regeneration, providers, grounding, quality, runs, scaffold, design
 eval/golden.json       requirements and expectations for scripts/run_eval.py
 scripts/               build_roadmap_md.py, run_eval.py
 Dockerfile  docker-compose.yml  .github/workflows/ci.yml
@@ -342,6 +369,9 @@ Dockerfile  docker-compose.yml  .github/workflows/ci.yml
   with the assertions left to write.
 - The quality check is a set of rules. It finds vague wording and missing pieces, not requirements that are
   clear but wrong.
+- The design rules read keywords. They find the usual parts of a business application and miss anything unusual,
+  so a draft is a starting point for review and not an architecture. The diagram is exported as Mermaid text and
+  is not drawn in the app.
 - One server process: the event bus is in memory. Running several workers needs Redis pub/sub (on the roadmap).
 - SQLite with `create_all` and no migration tool. Columns added in later versions are added automatically on start;
   anything bigger needs `python -m app.seed --reset` or Alembic (on the roadmap).

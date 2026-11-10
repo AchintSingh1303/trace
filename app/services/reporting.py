@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..models import GenerationRun, Requirement, TestCase, Traceability
+from .design import design_by_requirement, list_design
 from .execution import readiness
 
 PRIORITY_NUMBER = {"critical": 1, "high": 2, "medium": 3, "low": 4}
@@ -119,6 +120,7 @@ def traceability_matrix(db: Session, cycle_id: int) -> dict:
         per_req[link.requirement_id].append(link)
 
     result_state = {r["code"]: r["state"] for r in readiness(db, cycle_id)["rows"]}
+    design_map = design_by_requirement(db, cycle_id)
     rows = []
     covered = 0
     for req in reqs:
@@ -151,6 +153,7 @@ def traceability_matrix(db: Session, cycle_id: int) -> dict:
                 "stale": stale,
                 "state": state,
                 "result": result_state.get(req.code, "no_approved_cases"),
+                "design": design_map.get(req.code, []),
                 "tc_codes": sorted(cases[l.tc_id].tc_code for l in links),
             }
         )
@@ -181,6 +184,7 @@ def cycle_summary(db: Session, cycle_id: int) -> dict:
         stale_cases |= item["stale"]
     matrix = traceability_matrix(db, cycle_id)
     last_run = db.scalar(select(GenerationRun).where(GenerationRun.cycle_id == cycle_id).order_by(GenerationRun.id.desc()))
+    design = list_design(db, cycle_id)["summary"]
     return {
         "requirements": req_total,
         "test_cases": sum(status_counts.values()),
@@ -190,6 +194,13 @@ def cycle_summary(db: Session, cycle_id: int) -> dict:
         "stale_requirements": sum(1 for s in stats.values() if s["stale"]),
         "coverage_pct": matrix["summary"]["coverage_pct"],
         "readiness": readiness(db, cycle_id)["summary"],
+        "design": {
+            "elements": design["total"],
+            "approved": sum(v["approved"] for v in design["counts"].values()),
+            "pending": sum(v["pending"] for v in design["counts"].values()),
+            "high_risks": design["high_risks"],
+            "gaps": len(design["gaps"]),
+        },
         "uncovered_requirements": matrix["summary"]["uncovered"],
         "last_run": None
         if not last_run

@@ -30,6 +30,7 @@ const state = {
   quality: {},
   qualitySummary: null,
   openRun: null,
+  design: { data: null, filter: { kind: "", status: "" }, selected: new Set(), busy: false, last: null, open: null },
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -204,7 +205,7 @@ function renderTab(tab) {
     $(`#tab-${tab}`).innerHTML = `<div class="card empty">No project yet. Create one to get started.</div>`;
     return;
   }
-  ({ overview: renderOverview, requirements: renderRequirements, generate: renderGenerate, review: renderReview, execution: renderExecution, knowledge: renderKnowledge, team: renderTeam, trace: renderTrace, roadmap: renderRoadmap }[tab])();
+  ({ overview: renderOverview, requirements: renderRequirements, design: renderDesign, generate: renderGenerate, review: renderReview, execution: renderExecution, knowledge: renderKnowledge, team: renderTeam, trace: renderTrace, roadmap: renderRoadmap }[tab])();
 }
 
 // ------------------------------------------------------------------ overview
@@ -232,6 +233,8 @@ async function renderOverview() {
       <div class="card kpi"><div class="value">${s.stale_test_cases}</div><div class="label">Stale cases</div></div>
       <div class="card kpi"><div class="value">${s.readiness.ready_pct}%</div><div class="label">Requirements passing</div></div>
       <div class="card kpi"><div class="value">${s.readiness.failing}</div><div class="label">Requirements failing</div></div>
+      <div class="card kpi"><div class="value">${s.design.approved}/${s.design.elements}</div><div class="label">Design approved</div></div>
+      <div class="card kpi"><div class="value">${s.design.high_risks}</div><div class="label">High design risks</div></div>
     </div>
     ${s.stale_test_cases ? `<div class="notice warn">${s.stale_test_cases} test case(s) were written against an older version of ${s.stale_requirements} requirement(s). Run an <b>incremental</b> generation to refresh only those.</div>` : ""}
     <div class="grid two">
@@ -815,7 +818,7 @@ async function renderTrace() {
       <div class="card kpi"><div class="value">${s.pending_review}</div><div class="label">Need review</div></div>
       <div class="card kpi"><div class="value">${s.uncovered}</div><div class="label">No cases</div></div>
     </div>
-    <div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Type</th><th>Version</th><th>Cases by type</th><th>Review progress</th><th>State</th><th>Last result</th></tr></thead><tbody>${m.rows
+    <div class="table-wrap"><table><thead><tr><th>Requirement</th><th>Type</th><th>Version</th><th>Cases by type</th><th>Review progress</th><th>State</th><th>Last result</th><th>Design</th></tr></thead><tbody>${m.rows
       .map((r) => {
         const t = r.total || 1;
         const [cls, label] = stateLabel[r.state];
@@ -825,10 +828,245 @@ async function renderTrace() {
           <td><div class="stack" title="${r.statuses.approved} approved, ${r.statuses.pending} pending, ${r.statuses.rejected} rejected"><span class="a" style="width:${(100 * r.statuses.approved) / t}%"></span><span class="p" style="width:${(100 * r.statuses.pending) / t}%"></span><span class="r" style="width:${(100 * r.statuses.rejected) / t}%"></span></div>
             <div class="muted small">${r.statuses.approved}/${r.total} approved${r.stale ? ` · <span class="pill warn">${r.stale} stale</span>` : ""}</div></td>
           <td><span class="pill ${cls}">${label}</span></td>
-          <td><span class="pill ${RESULT_CLASS[r.result]}">${RESULT_LABEL[r.result]}</span></td></tr>`;
+          <td><span class="pill ${RESULT_CLASS[r.result]}">${RESULT_LABEL[r.result]}</span></td>
+          <td class="nowrap">${r.design.length ? r.design.map(esc).join(", ") : '<span class="muted">none approved</span>'}</td></tr>`;
       })
       .join("")}</tbody></table></div>
     <p class="muted small">Click a row to see its test cases in Review.</p>`;
+}
+
+// ------------------------------------------------------------------ design
+
+const KIND_LABEL = { component: "Component", flow: "Data flow", risk: "Risk" };
+const KIND_PLURAL = { component: "Components", flow: "Data flows", risk: "Risks" };
+const SEV_CLASS = { high: "bad", medium: "warn", low: "" };
+
+function designDetail(e) {
+  const d = e.detail || {};
+  if (e.kind === "component") {
+    const deps = (d.depends_on_names || []).map((x) => esc(x.name)).join(", ");
+    return `${esc(d.responsibility || e.summary)}${(d.interfaces || []).length ? `<div class="muted small">${d.interfaces.map(esc).join(", ")}</div>` : ""}${deps ? `<div class="muted small">Depends on ${deps}</div>` : ""}`;
+  }
+  if (e.kind === "flow") return `${esc(d.from_label)} &rarr; ${esc(d.to_label)}<div class="muted small">${esc(d.data || "")}</div>`;
+  return `${esc(d.mitigation || e.summary)}<div class="muted small">Likelihood ${esc(d.likelihood)}, impact ${esc(d.impact)}</div>`;
+}
+
+function filteredDesign() {
+  const f = state.design.filter;
+  return (state.design.data?.elements || []).filter((e) => (!f.kind || e.kind === f.kind) && (!f.status || e.status === f.status));
+}
+
+async function renderDesign() {
+  if (!state.design.data) $("#tab-design").innerHTML = '<div class="muted">Loading...</div>';
+  try {
+    state.design.data = await api(`/api/cycles/${state.cycleId}/design`);
+  } catch (err) {
+    $("#tab-design").innerHTML = `<div class="card empty">${esc(err.message)}</div>`;
+    return;
+  }
+  paintDesign();
+}
+
+function syncDesignKeyBox() {
+  const info = providerInfo(state.llm.provider);
+  const live = info && info.id !== "rules";
+  const box = $("#dKeyBox");
+  if (!box) return;
+  box.hidden = !live;
+  if (live) {
+    $("#dKey").value = state.llm.key; // a property, so the key never appears in the page markup
+    $("#dKey").placeholder = info.server_key ? "Using the key configured on the server (optional)" : info.key_hint;
+    $("#dModel").placeholder = info.default_model;
+  }
+}
+
+function designSummaryNotice(r) {
+  if (!r) return "";
+  const made = Object.entries(r.created).filter(([, n]) => n).map(([k, n]) => `${n} ${n === 1 ? KIND_LABEL[k].toLowerCase() : KIND_PLURAL[k].toLowerCase()}`).join(", ") || "nothing new";
+  const reasons = Object.entries(r.dropped_reasons || {}).map(([k, n]) => `${n} ${k.replace(/_/g, " ")}`).join(", ");
+  return `<div class="notice">Drafted ${esc(made)} with ${esc(r.generator)}. ${r.kept ? `Kept ${r.kept} you approved or corrected. ` : ""}${r.replaced ? `Replaced ${r.replaced} earlier draft item(s). ` : ""}${r.dropped ? `Dropped ${r.dropped} that could not be traced to a requirement (${esc(reasons)}).` : ""}</div>
+    ${r.fallback_reason ? `<div class="notice warn">The model could not draft (${esc(r.fallback_reason)}). The built-in rules were used instead.</div>` : ""}
+    ${(r.clarifications || []).length ? `<div class="notice warn"><b>Questions the model asked instead of guessing</b><ul>${r.clarifications.map((c) => `<li><b>${esc(c.req_code)}</b> ${esc(c.question)}</li>`).join("")}</ul></div>` : ""}`;
+}
+
+function paintDesign() {
+  const d = state.design.data;
+  const s = d.summary;
+  const f = state.design.filter;
+  const reviewer = can("tester");
+  const rows = filteredDesign();
+  const visible = new Set(rows.map((e) => e.id));
+  [...state.design.selected].forEach((id) => !visible.has(id) && state.design.selected.delete(id));
+  const allSelected = rows.length > 0 && rows.every((e) => state.design.selected.has(e.id));
+  const kpi = (kind) => {
+    const c = s.counts[kind];
+    return `<div class="card kpi"><div class="value">${c.approved}/${c.pending + c.approved + c.rejected}</div><div class="label">${KIND_PLURAL[kind]} approved</div></div>`;
+  };
+  const canRun = can("qa_lead");
+  $("#tab-design").innerHTML = `
+    <div class="page-head"><div><h2>Design</h2><div class="muted" style="max-width:720px">Components, data flows and risks drafted from the requirements. Every item quotes the requirement behind it, and nothing counts until a person approves it.</div></div>
+      ${canRun ? '<div class="toolbar"><button class="btn" data-dexport>Export approved (Markdown)</button></div>' : ""}</div>
+    <div class="grid two" style="align-items:start">
+      <div class="card">
+        <h3>Draft</h3>
+        <label>Who drafts it
+          <select id="dProvider">${state.providers.map((p) => `<option value="${p.id}" ${p.id === state.llm.provider ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select>
+        </label>
+        <div id="dKeyBox" class="keybox" hidden>
+          <label>API key<input id="dKey" type="password" autocomplete="off" spellcheck="false" /></label>
+          <label>Model <span class="muted">(edit if your account uses another)</span><input id="dModel" autocomplete="off" spellcheck="false" value="${esc(state.llm.model)}" /></label>
+          <p class="muted small">Sent with this request only. Never stored, logged or shown again.</p>
+        </div>
+        <button class="btn primary" data-draft style="margin-top:12px;width:100%" ${state.design.busy || !canRun ? "disabled" : ""}>${state.design.busy ? "Drafting..." : s.total ? "Draft again" : "Draft design"}</button>
+        <div class="muted small" style="margin-top:6px">${canRun ? "Drafting again keeps what you approved or corrected and replaces the rest." : "QA lead role or higher is needed to draft."}</div>
+      </div>
+      <div class="grid kpis" style="grid-template-columns:repeat(2,1fr)">
+        ${kpi("component")}${kpi("flow")}${kpi("risk")}
+        <div class="card kpi"><div class="value">${s.high_risks}</div><div class="label">High risks open</div></div>
+        <div class="card kpi"><div class="value">${s.covered}/${s.requirements}</div><div class="label">Requirements with design</div></div>
+        <div class="card kpi"><div class="value">${s.stale}</div><div class="label">Stale elements</div></div>
+      </div>
+    </div>
+    ${designSummaryNotice(state.design.last)}
+    ${s.stale ? `<div class="notice warn">${s.stale} element(s) were drafted from an older version of a requirement. Review them, or draft again.</div>` : ""}
+    ${s.total && s.gaps.length ? `<div class="notice warn"><b>No design yet for</b> ${s.gaps.map((g) => `${esc(g.code)} ${esc(g.title)}`).join(", ")}</div>` : ""}
+    <div class="toolbar" style="margin-top:14px">
+      <select id="dKind"><option value="">All kinds</option>${Object.keys(KIND_LABEL).map((k) => `<option value="${k}" ${f.kind === k ? "selected" : ""}>${KIND_PLURAL[k]}</option>`).join("")}</select>
+      <select id="dStatus"><option value="">All statuses</option>${["pending", "approved", "rejected"].map((t) => `<option value="${t}" ${f.status === t ? "selected" : ""}>${cap(t)}</option>`).join("")}</select>
+    </div>
+    <div class="table-wrap"><table><thead><tr>${reviewer ? `<th><input type="checkbox" id="dSelAll" aria-label="Select all" ${allSelected ? "checked" : ""}/></th>` : ""}<th>ID</th><th>Element</th><th>Detail</th><th>Severity</th><th>Requirements</th><th>Status</th></tr></thead>
+    <tbody>${
+      rows.length
+        ? rows
+            .map(
+              (e) => `<tr class="clickable" data-dopen="${e.id}">
+        ${reviewer ? `<td><input type="checkbox" data-dsel="${e.id}" ${state.design.selected.has(e.id) ? "checked" : ""} aria-label="Select ${esc(e.code)}"/></td>` : ""}
+        <td class="nowrap"><b>${esc(e.code)}</b></td>
+        <td><span class="pill ${e.kind === "risk" ? "warn" : e.kind === "flow" ? "info" : ""}">${KIND_LABEL[e.kind]}</span> ${esc(e.title)}${e.stale ? ' <span class="pill warn">stale</span>' : ""}${e.edited ? ' <span class="pill ok">corrected</span>' : ""}</td>
+        <td>${designDetail(e)}</td>
+        <td>${e.kind === "risk" ? `<span class="pill ${SEV_CLASS[e.detail.severity]}">${esc(e.detail.severity)}</span>` : ""}</td>
+        <td class="nowrap">${e.req_links.map((l) => esc(l.code)).join(", ")}</td>
+        <td>${statusPill(e.status)}</td></tr>`
+            )
+            .join("")
+        : `<tr><td colspan="7" class="empty">${s.total ? "Nothing matches these filters." : "No design yet. Draft one from the requirements."}</td></tr>`
+    }</tbody></table></div>
+    ${state.design.selected.size ? `<div class="bulkbar"><b>${state.design.selected.size} selected</b><span style="flex:1"></span><button class="btn ok" data-dbulk="approved">Approve</button><button class="btn bad" data-dbulk="rejected">Reject</button><button class="btn" data-dbulk="pending">Reset</button><button class="btn" data-dbulk-clear>Clear</button></div>` : ""}`;
+  syncDesignKeyBox();
+}
+
+async function startDraft() {
+  state.design.busy = true;
+  paintDesign();
+  try {
+    const body = { provider: state.llm.provider };
+    if (state.llm.key.trim()) body.api_key = state.llm.key.trim();
+    if (state.llm.model.trim()) body.model = state.llm.model.trim();
+    state.design.last = await api(`/api/cycles/${state.cycleId}/design/generate`, { method: "POST", body });
+    state.design.selected.clear();
+    toast(`Drafted ${state.design.last.total} design element(s).`);
+  } catch (err) {
+    toast(err.message, true);
+  }
+  state.design.busy = false;
+  await renderDesign();
+  refreshSummary();
+}
+
+async function designDecide(ids, status, notes) {
+  try {
+    if (status === "rejected" && !(notes || "").trim()) {
+      notes = prompt("Why is this being rejected? The next draft will avoid it.");
+      if (!notes || !notes.trim()) return;
+    }
+    if (ids.length === 1) await api(`/api/cycles/${state.cycleId}/design/${ids[0]}`, { method: "PATCH", body: { status, review_notes: notes || null } });
+    else await api(`/api/cycles/${state.cycleId}/design`, { method: "PATCH", body: { ids, status, review_notes: notes || null } });
+    toast(`${ids.length} design element(s) ${status === "pending" ? "reset" : status}.`);
+    state.design.selected.clear();
+    $("#drawer").classList.add("hidden");
+    await renderDesign();
+    refreshSummary();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function exportDesign() {
+  try {
+    const res = await api(`/api/cycles/${state.cycleId}/design/export/md`, { raw: true });
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `cycle-${state.cycleId}-design.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast("Exported the approved design.");
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function openDesignDrawer(id, editing = false) {
+  const e = state.design.data.elements.find((x) => x.id === id);
+  if (!e) return;
+  state.design.open = id;
+  const d = e.detail || {};
+  const reviewer = can("tester");
+  const box = $("#drawer");
+  const head = `<div style="display:flex;justify-content:space-between;gap:12px"><div class="muted">${esc(e.code)} &middot; ${KIND_LABEL[e.kind]}</div><button class="btn small" data-close-drawer>Close</button></div>`;
+  if (editing) {
+    const field = (label, key, value, rows = 2) => `<label>${label}<textarea id="de-${key}" rows="${rows}">${esc(value || "")}</textarea></label>`;
+    const level = (key) => `<label>${cap(key)}<select id="de-${key}">${["low", "medium", "high"].map((v) => `<option ${d[key] === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>`;
+    box.innerHTML = `${head}<h2>Edit ${esc(e.code)}</h2>
+      <label>Title<input id="de-title" value="${esc(e.title)}" /></label>
+      ${field("Summary", "summary", e.summary)}
+      ${e.kind === "component" ? field("Responsibility", "responsibility", d.responsibility) + field("Interfaces (one per line)", "interfaces", (d.interfaces || []).join("\n"), 3) : ""}
+      ${e.kind === "flow" ? field("Data", "data", d.data) + field("Trigger", "trigger", d.trigger) : ""}
+      ${e.kind === "risk" ? level("likelihood") + level("impact") + field("Mitigation", "mitigation", d.mitigation, 3) : ""}
+      <div class="actions"><button class="btn primary" data-dsave="${e.id}">Save</button><button class="btn" data-dcancel="${e.id}">Cancel</button></div>`;
+    box.classList.remove("hidden");
+    return;
+  }
+  box.innerHTML = `${head}
+    <h2>${esc(e.title)}</h2>
+    <div class="meta"><span class="pill ${e.source === "rules" ? "" : "info"}">${esc(e.source)}</span>${e.edited ? '<span class="pill ok">corrected by a person</span>' : ""}${e.kind === "risk" ? `<span class="pill ${SEV_CLASS[d.severity]}">${esc(d.severity)} severity</span>` : ""}${statusPill(e.status)}${e.stale ? '<span class="pill warn">stale</span>' : ""}</div>
+    <p>${esc(e.summary)}</p>
+    ${e.req_links.map((l) => `<div class="small ${l.stale ? "" : "muted"}">Drafted from <b>${esc(l.code)}</b> ${esc(l.title)} &middot; written against v${l.written_against}${l.stale ? ` <span class="pill warn">requirement is now v${l.current_version}</span>` : ""}</div>`).join("")}
+    ${e.evidence ? `<div class="evidence"><div class="muted small">Backed by this part of the requirement</div>${esc(e.evidence)}</div>` : ""}
+    <h3 style="margin-top:14px">Detail</h3>
+    ${e.kind === "risk" ? `<p><b>Mitigation.</b> ${esc(d.mitigation)}</p><div class="muted small">Likelihood ${esc(d.likelihood)}, impact ${esc(d.impact)}</div>` : `<div>${designDetail(e)}</div>`}
+    ${e.kind === "flow" && d.trigger ? `<p class="small"><b>Trigger:</b> ${esc(d.trigger)}</p>` : ""}
+    ${e.reviewed_by ? `<p class="muted small">Last reviewed by ${esc(e.reviewed_by)}${e.review_notes ? `: ${esc(e.review_notes)}` : ""}</p>` : ""}
+    ${reviewer ? `<h3 style="margin-top:14px">Decision</h3><textarea id="dNotes" rows="2" placeholder="Notes (needed to reject)">${esc(e.review_notes || "")}</textarea>
+      <div class="actions"><button class="btn" data-dedit="${e.id}">Edit</button><button class="btn ok" data-ddecide="approved" data-id="${e.id}">Approve</button><button class="btn bad" data-ddecide="rejected" data-id="${e.id}">Reject</button><button class="btn" data-ddecide="pending" data-id="${e.id}">Reset</button></div>` : '<p class="muted small">Your role can read but not review.</p>'}`;
+  box.classList.remove("hidden");
+}
+
+async function saveDesignEdit(id) {
+  const e = state.design.data.elements.find((x) => x.id === id);
+  const val = (k) => ($(`#de-${k}`) ? $(`#de-${k}`).value : undefined);
+  const detail = {};
+  if (e.kind === "component") {
+    detail.responsibility = val("responsibility");
+    detail.interfaces = val("interfaces").split("\n");
+  } else if (e.kind === "flow") {
+    detail.data = val("data");
+    detail.trigger = val("trigger");
+  } else {
+    detail.likelihood = val("likelihood");
+    detail.impact = val("impact");
+    detail.mitigation = val("mitigation");
+  }
+  try {
+    await api(`/api/cycles/${state.cycleId}/design/${id}`, { method: "PUT", body: { title: val("title"), summary: val("summary"), detail } });
+    toast("Saved. It now counts as corrected by a person.");
+    await renderDesign();
+    openDesignDrawer(id);
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 // ------------------------------------------------------------------ roadmap
@@ -1056,7 +1294,7 @@ async function deleteUser(id) {
 // ------------------------------------------------------------------ events
 
 document.addEventListener("click", async (ev) => {
-  const t = ev.target.closest("button, a, tr[data-open], tr[data-reqfilter], tr[data-openrun], .radio-card, [data-goto]");
+  const t = ev.target.closest("button, a, tr[data-open], tr[data-reqfilter], tr[data-openrun], tr[data-dopen], .radio-card, [data-goto]");
   if (!t) return;
   const ds = t.dataset;
 
@@ -1108,6 +1346,15 @@ document.addEventListener("click", async (ev) => {
     catch (err) { toast(err.message, true); }
     return;
   }
+  if (ds.draft !== undefined) return startDraft();
+  if (ds.dexport !== undefined) return exportDesign();
+  if (ds.dopen && !ev.target.closest("input")) return openDesignDrawer(Number(ds.dopen));
+  if (ds.dedit) return openDesignDrawer(Number(ds.dedit), true);
+  if (ds.dcancel) return openDesignDrawer(Number(ds.dcancel));
+  if (ds.dsave) return saveDesignEdit(Number(ds.dsave));
+  if (ds.ddecide) return designDecide([Number(ds.id)], ds.ddecide, $("#dNotes") ? $("#dNotes").value : undefined);
+  if (ds.dbulk) return designDecide([...state.design.selected], ds.dbulk);
+  if (ds.dbulkClear !== undefined) { state.design.selected.clear(); return paintDesign(); }
   if (t.id === "addReq") return openRequirementModal(null);
   if (t.id === "importReq") return openImportModal();
   if (ds.editcase) return openDrawer(Number(ds.editcase), true);
@@ -1161,6 +1408,16 @@ document.addEventListener("change", (ev) => {
     $("#gModel").value = "";
     syncGeneratorBox();
   }
+  else if (t.id === "dProvider") {
+    state.llm.provider = t.value;
+    state.llm.model = "";
+    localStorage.setItem("trace_provider", t.value);
+    paintDesign();
+  }
+  else if (t.id === "dKind") { state.design.filter.kind = t.value; paintDesign(); }
+  else if (t.id === "dStatus") { state.design.filter.status = t.value; paintDesign(); }
+  else if (t.id === "dSelAll") { filteredDesign().forEach((e) => (t.checked ? state.design.selected.add(e.id) : state.design.selected.delete(e.id))); paintDesign(); }
+  else if (t.dataset.dsel) { t.checked ? state.design.selected.add(Number(t.dataset.dsel)) : state.design.selected.delete(Number(t.dataset.dsel)); paintDesign(); }
   else if (t.id === "gStrict") state.llm.strict = t.checked;
   else if (ds_isRole(t)) changeRole(Number(t.dataset.roleuser), t.value);
   else if (t.id === "fType") { state.filters.type = t.value; renderReview(); }
@@ -1173,6 +1430,8 @@ document.addEventListener("change", (ev) => {
 document.addEventListener("input", (ev) => {
   if (ev.target.id === "gKey") state.llm.key = ev.target.value;
   else if (ev.target.id === "gModel") state.llm.model = ev.target.value;
+  else if (ev.target.id === "dKey") state.llm.key = ev.target.value;
+  else if (ev.target.id === "dModel") state.llm.model = ev.target.value;
   if (ev.target.id === "fQ") {
     state.filters.q = ev.target.value;
     const pos = ev.target.selectionStart;

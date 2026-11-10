@@ -95,6 +95,13 @@ Approved API cases export as one pytest file with the request written, the cover
 
 **Why:** Saves the typing and keeps the link from code back to requirement without claiming tests that have never seen the service.
 
+### Architecture and design from requirements
+*Design*
+
+A second pipeline drafts components, data flows and risks from the same requirements. Each item quotes the requirement behind it, goes through a review gate, goes stale when its requirement changes, and exports as a Markdown design document with a diagram.
+
+**Why:** Planning and testing start from the same requirements, so they should be traceable to each other and reviewed the same way.
+
 ## Considering next
 
 ### Cross-cycle coverage baseline
@@ -190,12 +197,12 @@ When an executed script fails, classify the failure, inspect the live page and p
 
 **Why:** Worth building only for failures that cannot be prevented by verifying locators when the script is generated.
 
-### Architecture and design from requirements
-*Design · effort: large*
+### Draw the design in the app
+*Design · effort: medium*
 
-A second pipeline that drafts components, data flows and risks from the same requirements, each item citing the requirement behind it, with its own review gate.
+Render the approved components and flows as a diagram on the Design tab, instead of only exporting Mermaid text.
 
-**Why:** Planning and testing share the same inputs. It reuses grounding and project knowledge, but needs its own data model and review flow.
+**Why:** A picture is quicker to review than a table, but it needs a layout that stays readable as the design grows.
 
 ## Principles behind this list
 

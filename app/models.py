@@ -215,3 +215,41 @@ class TestResult(Base):
     defect_ref: Mapped[str] = mapped_column(String(200), default="")
     executed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class DesignElement(Base):
+    """A drafted part of the design: a component, a data flow or a risk, always tied to requirements."""
+
+    __tablename__ = "design_elements"
+    __table_args__ = (UniqueConstraint("cycle_id", "code", name="uq_design_code"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("cycles.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)  # component | flow | risk
+    code: Mapped[str] = mapped_column(String(30))
+    title: Mapped[str] = mapped_column(String(300))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(30), default="rules")
+    warnings: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    links: Mapped[list["DesignLink"]] = relationship(cascade="all, delete-orphan", passive_deletes=True)
+
+
+class DesignLink(Base):
+    """Design element <-> requirement, with the requirement version it was written against."""
+
+    __tablename__ = "design_links"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle_id: Mapped[int] = mapped_column(ForeignKey("cycles.id", ondelete="CASCADE"), index=True)
+    element_id: Mapped[int] = mapped_column(ForeignKey("design_elements.id", ondelete="CASCADE"), index=True)
+    requirement_id: Mapped[int] = mapped_column(ForeignKey("requirements.id", ondelete="CASCADE"), index=True)
+    req_version: Mapped[int] = mapped_column(Integer, default=1)

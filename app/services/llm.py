@@ -100,7 +100,7 @@ SYSTEM_PROMPT = (
     "You are a senior QA engineer. Write precise, independent, executable test cases. "
     "One action per step, each with an observable expected result.\n"
     "Ground rules:\n"
-    "- Use O\nY facts stated in the requirements and the project knowledge. Do not invent "
+    "- Use ONLY facts stated in the requirements and the project knowledge. Do not invent "
     "endpoints, field names, limits, messages or behaviour.\n"
     "- Every case needs `evidence`: an exact quote from the requirement or its acceptance "
     "criteria that the case verifies. If you cannot quote one, do not write the case.\n"
@@ -184,7 +184,17 @@ def _post(cfg: LLMConfig, headers: dict, payload: dict) -> dict:
         raise LLMError(f"{cfg.label} sent a response that was not JSON") from None
 
 
-def _anthropic_call(cfg: LLMConfig, system: str, user: str, with_tool: bool, max_tokens: int) -> dict:
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    description: str
+    schema: dict
+
+
+CASES_TOOL = ToolSpec(TOOL_NAME, TOOL_DESCRIPTION, TOOL_SCHEMA)
+
+
+def _anthropic_call(cfg: LLMConfig, system: str, user: str, with_tool: bool, max_tokens: int, tool: ToolSpec = CASES_TOOL) -> dict:
     payload: dict = {
         "model": cfg.model,
         "max_tokens": max_tokens,
@@ -192,42 +202,42 @@ def _anthropic_call(cfg: LLMConfig, system: str, user: str, with_tool: bool, max
         "messages": [{"role": "user", "content": user}],
     }
     if with_tool:
-        payload["tools"] = [{"name": TOOL_NAME, "description": TOOL_DESCRIPTION, "input_schema": TOOL_SCHEMA}]
-        payload["tool_choice"] = {"type": "tool", "name": TOOL_NAME}
+        payload["tools"] = [{"name": tool.name, "description": tool.description, "input_schema": tool.schema}]
+        payload["tool_choice"] = {"type": "tool", "name": tool.name}
     headers = {"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
     return _post(cfg, headers, payload)
 
 
-def _openai_call(cfg: LLMConfig, system: str, user: str, with_tool: bool) -> dict:
+def _openai_call(cfg: LLMConfig, system: str, user: str, with_tool: bool, tool: ToolSpec = CASES_TOOL) -> dict:
     payload: dict = {
         "model": cfg.model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
     }
     if with_tool:
         payload["tools"] = [
-            {"type": "function", "function": {"name": TOOL_NAME, "description": TOOL_DESCRIPTION, "parameters": TOOL_SCHEMA}}
+            {"type": "function", "function": {"name": tool.name, "description": tool.description, "parameters": tool.schema}}
         ]
-        payload["tool_choice"] = {"type": "function", "function": {"name": TOOL_NAME}}
+        payload["tool_choice"] = {"type": "function", "function": {"name": tool.name}}
     headers = {"Authorization": f"Bearer {cfg.api_key}", "content-type": "application/json"}
     return _post(cfg, headers, payload)
 
 
-def _extract_tool_input(cfg: LLMConfig, data: dict) -> dict:
+def _extract_tool_input(cfg: LLMConfig, data: dict, tool: ToolSpec = CASES_TOOL, what: str = "test cases") -> dict:
     if cfg.provider == "anthropic":
         if data.get("stop_reason") == "max_tokens":
-            raise LLMError("The answer was cut off. Generate fewer requirements at a time or set a max test case limit.")
+            raise LLMError("The answer was cut off. Use fewer requirements at a time.")
         for block in data.get("content", []):
-            if block.get("type") == "tool_use" and block.get("name") == TOOL_NAME:
+            if block.get("type") == "tool_use" and block.get("name") == tool.name:
                 return block.get("input") or {}
-        raise LLMError("The model did not return test cases in the expected format")
+        raise LLMError(f"The model did not return {what} in the expected format")
     try:
         message = data["choices"][0]["message"]
         for call in message.get("tool_calls") or []:
-            if call["function"]["name"] == TOOL_NAME:
+            if call["function"]["name"] == tool.name:
                 return json.loads(call["function"]["arguments"])
     except (KeyError, IndexError, TypeError, ValueError):
         pass
-    raise LLMError("The model did not return test cases in the expected format")
+    raise LLMError(f"The model did not return {what} in the expected format")
 
 
 # ---------------------------------------------------------------------------- public API
